@@ -6,7 +6,6 @@ from database.database import close_db, get_connection
 
 
 class item(BaseModel):
-    id: int
     task: str
     priority: int
     description: str | None = None
@@ -42,13 +41,13 @@ async def addToDo(ToDo: ToDo, response: Response):
         cursor = conn.cursor()
 
         cursor.execute(
-            "INSERT INTO todos (id, task, priority, description) VALUES (%s, %s, %s, %s)",
-            (ToDo.item.id, ToDo.item.task, ToDo.item.priority, ToDo.item.description),
+            "INSERT INTO todos (task, priority, description) VALUES ( %s, %s, %s)",
+            ( ToDo.item.task, ToDo.item.priority, ToDo.item.description),
         )
         conn.commit()
-
+        print("cursor.lastrowid :", cursor.rowcount)
         response.status_code = status.HTTP_201_CREATED
-        return {"id": ToDo.item.id, "item": ToDo.item}
+        return {"id": cursor.lastrowid, "item": ToDo.item}
     except IntegrityError:
         response.status_code = status.HTTP_409_CONFLICT
         return {"error": "ToDo with this id already exists"}
