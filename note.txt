@@ -528,8 +528,202 @@ on specific port
 fastapi dev --port : 9000
 
 
+============================================================================================================================
+
+how to set environment variables (DB config) in this project
+
+used in : database/database.py
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "MyStrongPassword123"),
+    "database": os.getenv("DB_NAME", "todo_db"),
+}
+
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+
+
+what is os.getenv ?
+
+os.getenv("DB_HOST", "localhost")
+
+- first value  = environment variable name (DB_HOST)
+- second value = default if env variable is NOT set
+
+so if DB_HOST is not set anywhere, code uses "localhost" automatically.
+
+
+environment variables used in this project
+
+| Variable      | Default               | Purpose              |
+|---------------|-----------------------|----------------------|
+| DB_HOST       | localhost             | MySQL server address |
+| DB_USER       | root                  | MySQL username       |
+| DB_PASSWORD   | MyStrongPassword123   | MySQL password       |
+| DB_NAME       | todo_db               | database name        |
+| DB_POOL_SIZE  | 5                     | connection pool size |
+
+
+option 1 : use defaults in database.py (easiest for local learning)
+
+- open database/database.py
+- change default password directly in code:
+
+  "password": os.getenv("DB_PASSWORD", "your_mysql_password"),
+
+- no extra setup needed
+- run server normally:
+
+  source venv/bin/activate
+  fastapi dev
+
+
+option 2 : set env in terminal before starting server
+
+in the SAME terminal where you run fastapi:
+
+export DB_HOST=localhost
+export DB_USER=root
+export DB_PASSWORD=your_mysql_password
+export DB_NAME=todo_db
+export DB_POOL_SIZE=5
+
+source venv/bin/activate
+fastapi dev
+
+or one line:
+
+DB_PASSWORD=your_mysql_password fastapi dev
+
+note: these env values exist only in that terminal session.
+if you close terminal, you must export again.
+
+
+option 3 : use .env file (recommended for real projects)
+
+step 1: create file in project root
+
+ToDo/.env
+
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=your_mysql_password
+DB_NAME=todo_db
+DB_POOL_SIZE=5
+
+step 2: install dotenv package
+
+pip install python-dotenv
+
+step 3: load .env in main.py (top of file)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+step 4: run server
+
+source venv/bin/activate
+fastapi dev
+
+important:
+- add .env to .gitignore (never commit passwords)
+- os.getenv() does NOT read .env automatically
+- load_dotenv() reads .env and puts values into environment
+
+
+how to verify env is set
+
+echo $DB_PASSWORD
+echo $DB_HOST
+
+if value prints, FastAPI can read it when server starts.
+
+
+quick checklist
+
+1. MySQL running locally
+2. database created (run database/schema.sql)
+3. password set (option 1 or 2 or 3 above)
+4. pip install mysql-connector-python
+5. fastapi dev
+
+
+how connect dot env env file to system env 
+**Almost — but not by itself.**
+
+## What `os.getenv()` actually reads
+
+`os.getenv("DB_PASSWORD")` reads from the **system environment** (`os.environ`) — the same place `export DB_PASSWORD=...` in the terminal writes to.
+
+It does **not** open or read `.env` on its own.
+
+```
+os.getenv()  →  reads os.environ (system env)
+.env file    →  just a text file (Python ignores it unless something loads it)
+```
+
+## How `.env` connects to `os.getenv()`
+
+Your `main.py` has:
+
+```3:4:/home/geek-pc/Desktop/vicky/Python/ToDo/main.py
+from dotenv import load_dotenv
+load_dotenv()             # this will load the environment variables from the .env file and set them in the environment variables of the system
+```
+
+`load_dotenv()` reads `.env` and **copies values into `os.environ`**. After that, `os.getenv()` can see them.
+
+```
+.env file
+   ↓
+load_dotenv()  →  puts values into os.environ
+   ↓
+os.getenv("DB_PASSWORD")  →  reads from os.environ
+```
+
+So: **`.env` → `load_dotenv()` → system env → `os.getenv()`**
+
+## Important: import order in your `main.py`
+
+Right now you have:
+
+```python
+from routes.toDoRoutes import router   # ← imports database.py, pool created here
+from dotenv import load_dotenv
+load_dotenv()                          # ← .env loaded too late
+```
+
+`toDoRoutes` → `toDoController1` → `database.py` runs **before** `load_dotenv()`, so the pool may be created with defaults instead of `.env` values.
+
+**Fix — call `load_dotenv()` first:**
+
+```python
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI
+from routes.toDoRoutes import router as toDoRouter
+
+app = FastAPI()
+app.include_router(toDoRouter)
+```
+
+## Summary
+
+| Source | Does `os.getenv()` read it directly? |
+|--------|-------------------------------------|
+| `export` in terminal | Yes |
+| `.env` file | Only after `load_dotenv()` |
+| Default in code (`"localhost"`) | Used if env var is not set |
+
+**Short answer:** `os.getenv()` reads **system environment variables**. A `.env` file works only if `load_dotenv()` runs **before** `database.py` is imported.
+
+Want me to fix the import order in `main.py`?
+
 
 ==============================================================================================================================================++
+
 
 Q-5 :
 dedecorators function in python ?

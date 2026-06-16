@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from routes.toDoRoutes import router as toDoRouter
-
+from dotenv import load_dotenv
+load_dotenv()             # this will load the environment variables from the .env file and set them in the environment variables of the system
+  
 app = FastAPI()
 
 # @app.get('/')
