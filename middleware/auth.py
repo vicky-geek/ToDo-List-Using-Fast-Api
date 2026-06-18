@@ -1,4 +1,4 @@
-from fastapi import Request, HTTPException, status
+from fastapi import Depends, Request, HTTPException, status
 
 from utils.auth import verifyToken
 from utils.constant import ROLE_PERMISSIONS
@@ -27,6 +27,25 @@ def Authorization(request: Request):
     if not accessToken:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token not found")
     user = verifyToken(accessToken)
+    role = user.get("role")
+    path = request.url.path
+    method = request.method
+    allowed_paths = ROLE_PERMISSIONS.get(role, [])
+    allowed_methods = allowed_paths.get(path, [])
+    print("role :", role)
+    print("path :", path)
+    print("allowed_paths :", allowed_paths)
+    print("allowed_methods :", allowed_methods)
+    print("method :", method)
+    if path not in allowed_paths:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if method not in allowed_methods:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token")
+    return user
+
+def AuthorizationWithAuthentication(request: Request,user: dict = Depends(authenticate)):
     role = user.get("role")
     path = request.url.path
     method = request.method

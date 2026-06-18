@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends
 from controllers.toDoController1 import (getToDos, addToDo, getToDoById, updateToDoById, deleteToDoById)
-from middleware.auth import (authenticate, Authorization)
+from middleware.auth import (authenticate, Authorization,AuthorizationWithAuthentication)
 
-router = APIRouter(dependencies=[Depends(authenticate), Depends(Authorization)])
+# router = APIRouter(dependencies=[Depends(authenticate), Depends(Authorization)])
+router = APIRouter(dependencies=[Depends(AuthorizationWithAuthentication)])
+
 router.get('/todos')(getToDos)
 
 router.post('/todos')(addToDo)
