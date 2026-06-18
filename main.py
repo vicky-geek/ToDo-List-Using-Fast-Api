@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from routes.toDoRoutes import router as toDoRouter
 from dotenv import load_dotenv
+from routes.authRoutes import router as authRouter
 load_dotenv()             # this will load the environment variables from the .env file and set them in the environment variables of the system
   
 app = FastAPI()
@@ -11,3 +12,4 @@ app = FastAPI()
 #     return {"Hello": "World"}
 
 app.include_router(toDoRouter)
+app.include_router(authRouter)
