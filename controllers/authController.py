@@ -9,6 +9,7 @@ class RegisterUser(BaseModel):
     username: str
     email: str
     password: str
+    role: int
 
 class LoginUser(BaseModel):
     email: str
@@ -24,8 +25,8 @@ async def register(user : RegisterUser, response: Response):
 
         hashedPassword = encryptPass(user.password)
         cursor.execute(
-            "INSERT INTO users (username, email, password) VALUES ( %s, %s, %s)",
-            ( user.username, user.email, hashedPassword),
+            "INSERT INTO users (username, email, password, role) VALUES ( %s, %s, %s, %s)",
+            ( user.username, user.email, hashedPassword, user.role),
         )
         conn.commit()
         print("cursor.lastrowid :", cursor.rowcount)
