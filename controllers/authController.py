@@ -1,9 +1,9 @@
 from pydantic import BaseModel
-from fastapi import Response, status
+from fastapi import Response, status, Request, HTTPException
 from mysql.connector import Error, IntegrityError
 
 from database.database import close_db, get_connection
-from utils.auth import encryptPass, decryptPass, generateAccessToken, generateRefreshToken
+from utils.auth import encryptPass, decryptPass, generateAccessToken, generateRefreshToken, verifyToken
 
 class RegisterUser(BaseModel):
     username: str
@@ -76,4 +76,18 @@ async def login(LoginUser : LoginUser, response: Response):
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return {"error": str(e)}
     finally:
-        close_db(cursor, conn)
+        close_db(cursor, conn)  
+
+async def logout(response: Response):
+    response.delete_cookie("refresh_token")
+    return {"message": "Logout successful"}
+
+async def refreshToken(request: Request):
+    refreshToken = request.cookies.get("refresh_token")
+    if not refreshToken:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token not found")
+    user = verifyToken(refreshToken)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+    accessToken = generateAccessToken(user)
+    return {"accessToken": accessToken}

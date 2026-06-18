@@ -43,6 +43,7 @@ def generateAccessToken (user : dict) -> str:
         "id": user["id"],
         "username": user["username"],
         "email": user["email"],
+        "role": user["role"],
         "exp": _expires_at(os.getenv('ACCESS_TOKEN_EXPIRES_IN')),
     }
     print(" generateAccessToken payload :", payload)
@@ -56,6 +57,7 @@ def generateRefreshToken (user : dict) -> str:
         "id": user["id"],
         "username": user["username"],
         "email": user["email"],
+        "role": user["role"],
         "exp": _expires_at(os.getenv('REFRESH_TOKEN_EXPIRES_IN')),
         "type": "refresh",
     }

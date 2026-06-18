@@ -1,14 +1,38 @@
+from fastapi import Request, HTTPException, status
+
 from utils.auth import verifyToken
-from fastapi import Request, HTTPException
+from utils.constant import ROLE_PERMISSIONS
+
 
 def authenticate(request: Request):
-    token = request.headers.get('Authorization').split(' ')[1]
-    if not token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        user = verifyToken(token)
-        if not user:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        return user
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+    token = auth_header.split(" ", 1)[1]
+    print("token :", token)
+    user = verifyToken(token)
+    print("user :", user)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+    return user
+
+
+def Authorization(request: Request):
+    auth_header = request.headers.get("Authorization")
+    accessToken = auth_header.split(" ", 1)[1]
+    if not accessToken:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token not found")
+    user = verifyToken(accessToken)
+    role = user.get("role")
+    path = request.url.path
+    allowed_paths = ROLE_PERMISSIONS.get(role, [])
+    print("role :", role)
+    print("path :", path)
+    print("allowed_paths :", allowed_paths)
+    if path not in allowed_paths:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token")
+    return user
