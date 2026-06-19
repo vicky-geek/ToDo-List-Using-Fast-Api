@@ -1,5 +1,6 @@
 import bcrypt
 import jwt
+from jwt.exceptions import InvalidTokenError
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -69,5 +70,5 @@ def verifyToken (token : str) -> dict | None:
         jwt_secret = os.getenv('JWT_SECRET')
         jwt_algorithm = os.getenv('JWT_ALGORITHM')
         return jwt.decode(token, jwt_secret, algorithms=[jwt_algorithm])
-    except jwt.InvalidTokenError:
+    except InvalidTokenError:
         return None

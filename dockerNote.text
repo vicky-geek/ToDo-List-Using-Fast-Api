@@ -1,0 +1,1257 @@
+================================================================================
+DOCKER NOTES - ToDo FastAPI Project
+================================================================================
+
+This file covers:
+- What Docker files do in this project
+- How to run containers
+- Dockerfile CMD explanation
+- .env vs .env.example
+- DB_HOST localhost vs mysql
+- New developer setup after git pull
+- Docker Hub push and pull workflow
+- What is docker-compose.hub.yml and why it exists
+
+
+================================================================================
+1. WHAT IS DOCKER IN THIS PROJECT?
+================================================================================
+
+Docker packages the app + MySQL so anyone can run the same setup without
+manually installing Python venv, MySQL, and dependencies on their machine.
+
+Architecture:
+
+    docker compose up
+           |
+    +------+------+
+    |             |
+  mysql         app (FastAPI)
+  port 3306     port 8000
+    |             |
+    +------+------+
+    Docker network (app connects to mysql using service name)
+
+
+================================================================================
+2. FILES CREATED FOR DOCKER
+================================================================================
+
+| File                    | Purpose                                              |
+|-------------------------|------------------------------------------------------|
+| Dockerfile              | Builds Python image and defines how app starts       |
+| docker-compose.yml      | Build app locally + run MySQL (for you / development)|
+| docker-compose.hub.yml  | Pull pre-built app image from Docker Hub + run MySQL |
+| .dockerignore           | Files NOT copied into Docker image (venv, .env, etc) |
+| .env.example            | Safe template of required env variables for Git      |
+| .env                    | Your real secrets (local only, do NOT commit)         |
+
+
+================================================================================
+3. DOCKERFILE EXPLAINED (line by line)
+================================================================================
+
+FROM python:3.12-slim
+    -> Base image with Python 3.12
+
+WORKDIR /app
+    -> Working directory inside container
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+    -> Better Python logging inside Docker
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+    -> Install dependencies inside image
+
+COPY . .
+    -> Copy project code into image
+
+EXPOSE 8000
+    -> Documents that app uses port 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    -> Command that runs when container starts
+
+
+================================================================================
+4. WHAT IS CMD IN DOCKERFILE? (IMPORTANT)
+================================================================================
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+This is the startup command for the container.
+
+| Part              | Meaning                                           |
+|-------------------|---------------------------------------------------|
+| uvicorn           | Server that runs FastAPI                          |
+| main:app          | Load `app` object from main.py                    |
+| --host 0.0.0.0    | Listen on all interfaces inside container         |
+| --port 8000       | App listens on port 8000                          |
+
+Local development:
+    fastapi dev
+
+Inside Docker:
+    uvicorn main:app --host 0.0.0.0 --port 8000
+
+Why 0.0.0.0 and not 127.0.0.1?
+    - 127.0.0.1 = only inside container (you cannot access from laptop)
+    - 0.0.0.0     = allows docker port mapping 8000:8000 to work
+
+Without CMD, container builds but API does not start.
+
+
+================================================================================
+5. DOCKER-COMPOSE.YML EXPLAINED
+================================================================================
+
+services:
+
+  mysql:
+    - Uses official MySQL 8.0 image
+    - Creates database from DB_NAME in .env
+    - Runs database/schema.sql on FIRST start only
+    - Stores data in volume mysql_data (persistent)
+    - healthcheck waits until MySQL is ready
+
+  app:
+    - Builds image from Dockerfile
+    - Reads variables from .env
+    - OVERRIDES DB_HOST to "mysql" for Docker network
+    - Waits for mysql healthcheck before starting
+    - Maps port 8000 on laptop -> 8000 in container
+
+
+================================================================================
+6. .env vs .env.example
+================================================================================
+
+You already have .env for your machine. Why .env.example?
+
+| File          | Purpose                         | Commit to Git? |
+|---------------|---------------------------------|----------------|
+| .env          | Real passwords and secrets      | NO             |
+| .env.example  | Template showing required keys  | YES            |
+
+Example .env (private):
+    DB_PASSWORD=MyStrongPassword123
+    JWT_SECRET=mysecretkey
+
+Example .env.example (safe to share):
+    DB_PASSWORD=change_me
+    JWT_SECRET=change_me
+
+When another developer clones repo:
+    - .env is NOT in repo (in .gitignore)
+    - .env.example IS in repo
+    - They copy: cp .env.example .env
+    - Then edit .env with their own values
+
+You do NOT need .env.example for yourself if .env already exists.
+It is mainly for teammates and documentation.
+
+
+================================================================================
+7. DB_HOST=localhost IN .env — WILL IT WORK WITH MYSQL CONTAINER?
+================================================================================
+
+Short answer: YES with current docker-compose.yml.
+
+Your .env may have:
+    DB_HOST=localhost
+
+But docker-compose.yml has:
+    environment:
+      DB_HOST: mysql
+
+Docker Compose loads .env first, then environment: section OVERRIDES same key.
+
+Inside app container:
+    DB_HOST = mysql   (not localhost)
+
+Why localhost fails inside Docker app container:
+    localhost inside app container = the app container itself, NOT MySQL
+
+Containers communicate using service names:
+    DB_HOST=mysql  -> connects to mysql service on Docker network
+
+Two environments, one .env file:
+
+| How you run app              | DB_HOST value |
+|------------------------------|---------------|
+| Local fastapi dev + local MySQL | localhost  |
+| Docker compose               | mysql (overridden by compose) |
+
+Verify inside running container:
+    docker compose exec app printenv DB_HOST
+    Expected output: mysql
+
+
+================================================================================
+8. PREREQUISITES (INSTALL DOCKER)
+================================================================================
+
+Linux (Ubuntu/Debian):
+
+    sudo apt update
+    sudo apt install docker.io docker-compose-v2
+    sudo usermod -aG docker $USER
+
+Then log out and log back in so docker group applies.
+
+Check installation:
+
+    docker --version
+    docker compose version
+
+
+================================================================================
+9. HOW TO RUN DOCKER CONTAINERS (FIRST TIME)
+================================================================================
+
+Step 1: Go to project folder
+
+    cd /path/to/ToDo
+
+Step 2: Create .env if missing
+
+    cp .env.example .env
+
+Edit .env and set your passwords/secrets.
+
+Step 3: Build and start containers
+
+    docker compose up --build
+
+First run:
+    - Downloads MySQL image
+    - Builds app image from Dockerfile
+    - Creates mysql_data volume
+    - Runs schema.sql automatically (first MySQL start only)
+    - Starts FastAPI on http://127.0.0.1:8000
+
+Step 4: Open API docs
+
+    http://127.0.0.1:8000/docs
+
+
+================================================================================
+10. COMMON DOCKER COMMANDS
+================================================================================
+
+Start (foreground, see logs):
+    docker compose up --build
+
+Start in background:
+    docker compose up -d --build
+
+Stop containers:
+    docker compose down
+
+Stop and delete database volume (fresh DB):
+    docker compose down -v
+
+View running containers:
+    docker compose ps
+
+View app logs:
+    docker compose logs -f app
+
+View mysql logs:
+    docker compose logs -f mysql
+
+Restart app only:
+    docker compose restart app
+
+Open shell inside app container:
+    docker compose exec app bash
+
+Check env inside app container:
+    docker compose exec app printenv DB_HOST
+
+
+================================================================================
+11. TEST API AFTER DOCKER START
+================================================================================
+
+Register:
+
+    curl -X POST 'http://127.0.0.1:8000/register' \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "username": "vicky",
+      "email": "vicky@example.com",
+      "password": "MyPassword123",
+      "role": 1
+    }'
+
+Login:
+
+    curl -X POST 'http://127.0.0.1:8000/login' \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "email": "vicky@example.com",
+      "password": "MyPassword123"
+    }'
+
+Get todos (with token):
+
+    curl 'http://127.0.0.1:8000/todos' \
+    -H 'Authorization: Bearer YOUR_ACCESS_TOKEN'
+
+
+================================================================================
+12. NEW DEVELOPER SETUP AFTER GIT PULL (NO venv IN REPO)
+================================================================================
+
+venv/ is NOT pushed to Git. Each developer creates their own environment.
+
+Option A: Run with Docker (recommended for same setup)
+
+    git clone <repo-url>
+    cd ToDo
+    cp .env.example .env
+    # edit .env with your passwords
+    docker compose up --build
+
+Option B: Run locally without Docker
+
+    git clone <repo-url>
+    cd ToDo
+    cp .env.example .env
+    # edit .env - use DB_HOST=localhost
+
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+
+    # install and start local MySQL, then:
+    mysql -u root -p < database/schema.sql
+
+    fastapi dev
+
+Files NOT in repo (each dev creates locally):
+    - venv/
+    - .env
+
+Files IN repo (shared by team):
+    - Dockerfile
+    - docker-compose.yml
+    - requirements.txt
+    - .env.example
+    - database/schema.sql
+    - source code
+
+
+================================================================================
+13. WHAT GETS COPIED INTO DOCKER IMAGE (.dockerignore)
+================================================================================
+
+These are excluded from Docker build:
+
+    venv/          -> not needed, pip install runs in image
+    .env           -> passed via docker-compose env_file instead
+    __pycache__/   -> cache files
+    note.txt       -> personal notes
+    .git/          -> not needed in image
+
+Important:
+    .env is ignored during docker BUILD
+    but still used at RUN time through docker-compose env_file: .env
+
+
+================================================================================
+14. SCHEMA.SQL AND DOCKER MYSQL
+================================================================================
+
+database/schema.sql is mounted to:
+    /docker-entrypoint-initdb.d/schema.sql
+
+MySQL container runs this script automatically on FIRST startup only.
+
+Creates:
+    - todo_db database
+    - todos table
+    - users table
+
+If you need to re-run schema from scratch:
+    docker compose down -v
+    docker compose up --build
+
+Warning: down -v deletes all database data in volume.
+
+
+================================================================================
+15. LOCAL DEV vs DOCKER — QUICK COMPARISON
+================================================================================
+
+| Topic            | Local (fastapi dev)     | Docker                    |
+|------------------|-------------------------|---------------------------|
+| Start command    | fastapi dev             | docker compose up --build |
+| Python env       | venv on your machine    | inside app container      |
+| MySQL            | local install           | mysql container           |
+| DB_HOST          | localhost               | mysql (overridden)        |
+| API URL          | http://127.0.0.1:8000   | http://127.0.0.1:8000     |
+| Hot reload       | yes (fastapi dev)       | no (unless configured)    |
+| Team consistency | depends on local setup  | same for everyone         |
+
+
+================================================================================
+16. TROUBLESHOOTING
+================================================================================
+
+Problem: app cannot connect to database
+Fix:
+    - check DB_HOST inside container: docker compose exec app printenv DB_HOST
+    - should be "mysql" not "localhost"
+    - check mysql logs: docker compose logs mysql
+
+Problem: port 8000 already in use
+Fix:
+    - stop local fastapi dev server
+    - or change port in docker-compose.yml: "9000:8000"
+
+Problem: port 3306 already in use (local MySQL running)
+Fix:
+    - stop local MySQL: sudo systemctl stop mysql
+    - or change mysql port mapping: "3307:3306"
+
+Problem: permission denied for docker command
+Fix:
+    - sudo usermod -aG docker $USER
+    - log out and log back in
+
+Problem: schema changes not applied
+Fix:
+    - init scripts run only on first DB volume creation
+    - run: docker compose down -v && docker compose up --build
+    - or apply SQL manually to running mysql container
+
+
+================================================================================
+17. QUICK START CHEAT SHEET
+================================================================================
+
+# First time
+cp .env.example .env
+docker compose up --build
+
+# Daily use
+docker compose up -d
+docker compose logs -f app
+docker compose down
+
+# Fresh database
+docker compose down -v
+docker compose up --build
+
+# API
+http://127.0.0.1:8000/docs
+
+================================================================================
+18. DOCKER HUB — PUSH IMAGE (FOR PROJECT OWNER / YOU)
+================================================================================
+
+Docker Hub is like GitHub for Docker images.
+You build the app image once, push it, and teammates pull it instead of building locally.
+
+What gets pushed:
+    - only the APP image (FastAPI)
+    - NOT mysql (teammates still use official mysql:8.0 image from Docker Hub)
+
+Prerequisites:
+    1. Create free account: https://hub.docker.com
+    2. Create repository on Docker Hub (example name: todo-app)
+    3. Docker installed on your machine
+
+
+--------------------------------------------------------------------------------
+Step 1: Login to Docker Hub
+--------------------------------------------------------------------------------
+
+    docker login
+
+Enter Docker Hub username and password (or access token).
+
+
+--------------------------------------------------------------------------------
+Step 2: Build app image locally
+--------------------------------------------------------------------------------
+
+From project folder:
+
+    docker compose build app
+
+Check image name:
+
+    docker images
+
+You may see something like:
+    todo-app    latest    ...
+or:
+    todo_app    latest    ...
+
+
+--------------------------------------------------------------------------------
+Step 3: Tag image for Docker Hub
+--------------------------------------------------------------------------------
+
+Format:
+    docker tag <local-image-name> <dockerhub-username>/<repo-name>:<tag>
+
+Example (replace YOUR_DOCKERHUB_USERNAME with your real username):
+
+    docker tag todo-app YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+If local name is todo_app:
+
+    docker tag todo_app YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+Tag naming convention:
+    username/repository:version
+    example: vicky123/todo-app:latest
+              vicky123/todo-app:1.0
+
+
+--------------------------------------------------------------------------------
+Step 4: Push image to Docker Hub
+--------------------------------------------------------------------------------
+
+    docker push YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+Wait until upload completes. Image is now public (or private if repo is private).
+
+
+--------------------------------------------------------------------------------
+Step 5: Verify on Docker Hub website
+--------------------------------------------------------------------------------
+
+Open:
+    https://hub.docker.com/r/YOUR_DOCKERHUB_USERNAME/todo-app
+
+You should see your pushed image and tags (latest).
+
+
+--------------------------------------------------------------------------------
+Push new version after code changes
+--------------------------------------------------------------------------------
+
+    docker compose build app
+    docker tag todo-app YOUR_DOCKERHUB_USERNAME/todo-app:latest
+    docker push YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+For versioned releases (recommended):
+
+    docker tag todo-app YOUR_DOCKERHUB_USERNAME/todo-app:1.1
+    docker push YOUR_DOCKERHUB_USERNAME/todo-app:1.1
+    docker push YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+
+================================================================================
+18B. WHAT IS docker-compose.hub.yml? (WHY THIS FILE EXISTS)
+================================================================================
+
+docker-compose.hub.yml is for developers who PULL your pre-built app image
+from Docker Hub instead of building from source on their machine.
+
+Only ONE main difference vs docker-compose.yml:
+
+    docker-compose.yml:
+        app:
+            build: .
+            -> builds image from Dockerfile on local machine
+
+    docker-compose.hub.yml:
+        app:
+            image: YOUR_DOCKERHUB_USERNAME/todo-app:latest
+            -> downloads ready-made image from Docker Hub
+
+MySQL part is SAME in both files (still uses official mysql:8.0 image).
+
+
+--------------------------------------------------------------------------------
+Who uses which file?
+--------------------------------------------------------------------------------
+
+| Person              | File used               | Command                                      |
+|---------------------|-------------------------|----------------------------------------------|
+| You (project owner) | docker-compose.yml      | docker compose up --build                    |
+| New teammate        | docker-compose.hub.yml  | docker compose -f docker-compose.hub.yml up -d |
+
+
+--------------------------------------------------------------------------------
+Why do we need a separate hub file?
+--------------------------------------------------------------------------------
+
+Without docker-compose.hub.yml:
+    - every developer must have full source code
+    - every developer runs docker build (slower)
+    - build can differ slightly per machine
+
+With docker-compose.hub.yml:
+    - teammate pulls exact same image you pushed
+    - no local build step
+    - faster and consistent setup
+
+New developer still needs from Git:
+    - docker-compose.hub.yml
+    - database/schema.sql
+    - .env.example
+
+New developer does NOT need for running app:
+    - venv/
+    - pip install
+    - docker build
+    - Python source inside container (already in pushed image)
+
+
+--------------------------------------------------------------------------------
+Flow diagram
+--------------------------------------------------------------------------------
+
+    YOU (owner)
+        |
+        | docker compose build
+        | docker push
+        v
+    Docker Hub  (YOUR_DOCKERHUB_USERNAME/todo-app:latest)
+        |
+        | docker compose -f docker-compose.hub.yml pull
+        v
+    NEW DEVELOPER laptop
+        app container  +  mysql container
+
+
+--------------------------------------------------------------------------------
+Before sharing with team
+--------------------------------------------------------------------------------
+
+Edit docker-compose.hub.yml and replace placeholder:
+
+    image: YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+Example:
+
+    image: vicky123/todo-app:latest
+
+
+--------------------------------------------------------------------------------
+When should teammate use docker-compose.yml instead?
+--------------------------------------------------------------------------------
+
+Use docker-compose.yml (build: .) when developer needs to:
+    - change Python code
+    - debug inside Dockerfile
+    - test code changes before you push new image
+
+Use docker-compose.hub.yml (image: ...) when developer only needs to:
+    - run the app locally
+    - test API
+    - work without building
+
+
+================================================================================
+19. NEW DEVELOPER — PULL IMAGE AND RUN (NO BUILD NEEDED)
+================================================================================
+
+New developer does NOT need:
+    - Python venv
+    - pip install
+    - docker build
+
+New developer still needs:
+    - Docker installed
+    - git clone (for docker-compose + schema.sql + .env.example)
+    - .env file
+    - pull your app image from Docker Hub
+
+
+--------------------------------------------------------------------------------
+Option A: Using docker-compose.hub.yml (recommended)
+--------------------------------------------------------------------------------
+
+Project includes: docker-compose.hub.yml
+
+Before sharing, project owner must replace placeholder in that file:
+    YOUR_DOCKERHUB_USERNAME/todo-app:latest
+    -> actual username, example: vicky123/todo-app:latest
+
+New developer steps:
+
+Step 1: Clone repo
+
+    git clone <repo-url>
+    cd ToDo
+
+Step 2: Create .env
+
+    cp .env.example .env
+    # edit passwords and secrets
+
+Step 3: Pull images and start
+
+    docker compose -f docker-compose.hub.yml pull
+    docker compose -f docker-compose.hub.yml up -d
+
+Step 4: Open API
+
+    http://127.0.0.1:8000/docs
+
+What happens:
+    - app image pulled from Docker Hub (your pushed image)
+    - mysql image pulled from Docker Hub (official mysql:8.0)
+    - schema.sql runs on first MySQL start
+    - API runs on port 8000
+
+
+--------------------------------------------------------------------------------
+Option B: Pull image manually with docker run
+--------------------------------------------------------------------------------
+
+Usually use docker compose (Option A). Manual run example:
+
+Pull app image:
+
+    docker pull YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+Run MySQL first (with network + schema), then run app with same network.
+docker compose is easier — prefer Option A.
+
+
+--------------------------------------------------------------------------------
+Compare: build vs pull workflow
+--------------------------------------------------------------------------------
+
+| Who          | Command                                              |
+|--------------|------------------------------------------------------|
+| You (owner)  | docker compose up --build                            |
+| New dev      | docker compose -f docker-compose.hub.yml up -d     |
+
+| File                    | app service uses          |
+|-------------------------|---------------------------|
+| docker-compose.yml      | build: . (build locally)  |
+| docker-compose.hub.yml  | image: user/todo-app:latest (pull) |
+
+
+================================================================================
+20. FILES NEW DEVELOPER NEEDS FROM GIT (WITH DOCKER HUB PULL)
+================================================================================
+
+Required from repo:
+    - docker-compose.hub.yml
+    - database/schema.sql
+    - .env.example
+
+NOT required from repo:
+    - venv/
+    - Dockerfile (optional for dev who only pulls)
+    - source code inside image (already baked into pushed image)
+
+Create locally:
+    - .env (from .env.example)
+
+Note:
+    If developer needs to change Python code, they should use docker-compose.yml
+    with build: . instead of pulling pre-built image.
+
+
+================================================================================
+21. DOCKER HUB TROUBLESHOOTING
+================================================================================
+
+Problem: denied: requested access to the resource is denied
+Fix:
+    - run: docker login
+    - check image tag starts with your Docker Hub username
+    - example: vicky123/todo-app:latest (not just todo-app:latest)
+
+Problem: pull access denied for image
+Fix:
+    - image repo is private and dev is not added as collaborator
+    - or wrong image name/tag
+    - login: docker login
+
+Problem: docker compose hub file still tries to build
+Fix:
+    - use docker-compose.hub.yml (has image:, not build:)
+    - command: docker compose -f docker-compose.hub.yml up -d
+
+Problem: new dev pulled image but API old version
+Fix:
+    - owner pushed new image
+    - dev runs:
+        docker compose -f docker-compose.hub.yml pull
+        docker compose -f docker-compose.hub.yml up -d
+
+
+================================================================================
+22. DOCKER HUB QUICK CHEAT SHEET
+================================================================================
+
+# OWNER — push image
+docker login
+docker compose build app
+docker tag todo-app YOUR_DOCKERHUB_USERNAME/todo-app:latest
+docker push YOUR_DOCKERHUB_USERNAME/todo-app:latest
+
+# NEW DEVELOPER — pull and run
+git clone <repo-url>
+cd ToDo
+cp .env.example .env
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
+
+# API
+http://127.0.0.1:8000/docs
+
+================================================================================
+
+
+
+
+
+
+Docker lifecycle
+
+Dockerfile
+    ↓
+docker build
+    ↓
+Image Created
+    ↓
+docker run / docker compose up
+    ↓
+CMD executes
+    ↓
+Uvicorn starts
+    ↓
+FastAPI application starts
+
+cmd in docker file ===>
+The `CMD` instruction is executed **when a container starts**, not when the image is built.
+
+### During image build
+
+When you run:
+
+```bash
+docker build -t my-fastapi-app .
+```
+
+Docker executes:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+ENV ...
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+```
+
+But **it does NOT run**:
+
+```dockerfile
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+---
+
+### During container start
+
+When you run:
+
+```bash
+docker run my-fastapi-app
+```
+
+or
+
+```bash
+docker compose up
+```
+
+Docker creates a container from the image and then executes:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+inside the container.
+
+---
+
+### Docker lifecycle
+
+```text
+Dockerfile
+    ↓
+docker build
+    ↓
+Image Created
+    ↓
+docker run / docker compose up
+    ↓
+CMD executes
+    ↓
+Uvicorn starts
+    ↓
+FastAPI application starts
+```
+
+---
+
+### How to verify
+
+Start the container:
+
+```bash
+docker compose up
+```
+
+You should see logs like:
+
+```text
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+These logs appear because Docker executed the `CMD`.
+
+---
+
+### CMD can be overridden
+
+Suppose your Dockerfile has:
+
+```dockerfile
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+You can override it:
+
+```bash
+docker run my-fastapi-app python test.py
+```
+
+Now Docker runs:
+
+```bash
+python test.py
+```
+
+instead of Uvicorn.
+
+---
+
+### Difference between RUN and CMD
+
+| Instruction  | Executes During                           |
+| ------------ | ----------------------------------------- |
+| `RUN`        | Image build time                          |
+| `CMD`        | Container start time                      |
+| `ENTRYPOINT` | Container start time (harder to override) |
+
+Example:
+
+```dockerfile
+RUN pip install -r requirements.txt
+```
+
+runs once while building the image.
+
+```dockerfile
+CMD ["uvicorn", "main:app"]
+```
+
+runs every time a container is started from that image.
+
+
+=============================================================================
+
+
+how mysql container auto create db and tables
+
+how databases create : ----
+
+
+
+The database is being created automatically because of these environment variables:
+
+```yaml
+environment:
+  MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+  MYSQL_DATABASE: ${DB_NAME}
+```
+
+When the **MySQL container starts for the first time**, the official MySQL image reads these variables and initializes the database.
+
+For example, if your `.env` contains:
+
+```env
+DB_NAME=todo_db
+DB_PASSWORD=root123
+```
+
+Docker will effectively start MySQL with:
+
+```yaml
+environment:
+  MYSQL_ROOT_PASSWORD: root123
+  MYSQL_DATABASE: todo_db
+```
+
+During initialization, MySQL automatically executes something similar to:
+
+```sql
+CREATE DATABASE todo_db;
+```
+
+---
+
+### What happens on first startup?
+
+1. Docker starts the MySQL container.
+2. MySQL checks `/var/lib/mysql`.
+3. If it's empty (fresh container/volume):
+
+   * Creates root user
+   * Sets root password
+   * Creates database from `MYSQL_DATABASE`
+   * Executes scripts in `/docker-entrypoint-initdb.d/`
+4. Stores data in the volume:
+
+```yaml
+volumes:
+  - mysql_data:/var/lib/mysql
+```
+
+---
+
+### Your schema.sql
+
+You have:
+
+```yaml
+volumes:
+  - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+```
+
+After the database is created, MySQL automatically runs:
+
+```sql
+-- schema.sql
+CREATE TABLE ...
+INSERT INTO ...
+```
+
+against the newly created database.
+
+---
+
+### Why it may not recreate the database
+
+Because you're using a persistent volume:
+
+```yaml
+volumes:
+  mysql_data:
+```
+
+Once MySQL initializes, data remains in the volume.
+
+Even if you do:
+
+```bash
+docker compose down
+docker compose up
+```
+
+the database won't be recreated because the volume still exists.
+
+---
+
+### To force reinitialization
+
+Remove containers **and volumes**:
+
+```bash
+docker compose down -v
+```
+
+Then start again:
+
+```bash
+docker compose up
+```
+
+Now MySQL will:
+
+* Create the database again
+* Run `schema.sql` again
+
+---
+
+### Verify inside the container
+
+Connect to the container:
+
+```bash
+docker exec -it todo_mysql mysql -u root -p
+```
+
+Enter your password, then:
+
+```sql
+SHOW DATABASES;
+```
+
+You should see:
+
+```text
+information_schema
+mysql
+performance_schema
+sys
+todo_db
+```
+
+(where `todo_db` is whatever `DB_NAME` is set to).
+
+### Important
+
+The automatic database creation comes from the **official** MySQL image (`mysql:8.0`), not from Docker Compose itself. Docker Compose is simply passing the environment variables that the MySQL image knows how to use.
+
+
+
+
+
+*****************************************************
+how tables create automatic
+After connecting to MySQL, you can list tables with these commands.
+
+### 1. Connect to MySQL
+
+If using your Docker container:
+
+```bash
+docker exec -it todo_mysql mysql -u root -p
+```
+
+Enter the root password.
+
+---
+
+### 2. Show databases
+
+```sql
+SHOW DATABASES;
+```
+
+Example:
+
+```text
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| sys                |
+| todo_db            |
++--------------------+
+```
+
+---
+
+### 3. Select your database
+
+```sql
+USE todo_db;
+```
+
+Replace `todo_db` with your actual database name.
+
+---
+
+### 4. Show all tables
+
+```sql
+SHOW TABLES;
+```
+
+Example:
+
+```text
++-------------------+
+| Tables_in_todo_db |
++-------------------+
+| users             |
+| todos             |
++-------------------+
+```
+
+---
+
+### 5. See table structure
+
+```sql
+DESCRIBE todos;
+```
+
+or
+
+```sql
+SHOW COLUMNS FROM todos;
+```
+
+Example:
+
+```text
++-----------+--------------+------+-----+---------+----------------+
+| Field     | Type         | Null | Key | Default | Extra          |
++-----------+--------------+------+-----+---------+----------------+
+| id        | int          | NO   | PRI | NULL    | auto_increment |
+| task      | varchar(255) | NO   |     | NULL    |                |
+| completed | tinyint(1)   | YES  |     | 0       |                |
++-----------+--------------+------+-----+---------+----------------+
+```
+
+---
+
+### 6. View table data
+
+```sql
+SELECT * FROM todos;
+```
+
+---
+
+### One-liner from terminal
+
+Without entering the MySQL shell:
+
+```bash
+docker exec -it todo_mysql mysql -u root -pYOUR_PASSWORD -e "USE todo_db; SHOW TABLES;"
+```
+
+For your setup, I would first run:
+
+```sql
+SHOW DATABASES;
+```
+
+then:
+
+```sql
+USE <your_db_name>;
+SHOW TABLES;
+```
+
+and share the output if you're unsure whether `schema.sql` was executed successfully.
+
+
