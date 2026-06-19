@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: todo-config
+  namespace: todo
+data:
+  DB_HOST: mysql-service
+  DB_NAME: todo_db
+  DB_POOL_SIZE: "5"
+  JWT_ALGORITHM: HS256
+  ACCESS_TOKEN_EXPIRES_IN: 5m
+  REFRESH_TOKEN_EXPIRES_IN: 7d

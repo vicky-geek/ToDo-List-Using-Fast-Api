@@ -1,0 +1,570 @@
+================================================================================
+KUBERNETES SETUP GUIDE — ToDo FastAPI Project
+================================================================================
+
+This note covers:
+    1. Tools to install on your Linux system
+    2. What each file in k8s/ folder does
+    3. Step-by-step deploy commands
+    4. How to access and test the API
+
+Related files:
+    kubernetesNote.text  — full K8s learning guide (concepts)
+    k8sSetupNote.text    — this file (tools + files + deploy)
+    k8s/                 — Kubernetes YAML manifest files
+
+
+================================================================================
+PART 1 — TOOLS TO INSTALL ON YOUR SYSTEM
+================================================================================
+
+Install these in order.
+
+--------------------------------------------------------------------------------
+1. Docker (required — minikube runs on top of Docker)
+--------------------------------------------------------------------------------
+
+You likely already have Docker from containerization learning.
+
+Check:
+    docker --version
+    docker compose version
+
+If missing:
+    sudo apt update
+    sudo apt install docker.io docker-compose-v2
+    sudo usermod -aG docker $USER
+    # log out and log back in
+
+
+--------------------------------------------------------------------------------
+2. kubectl (Kubernetes command-line tool)
+--------------------------------------------------------------------------------
+
+kubectl talks to your Kubernetes cluster (like docker compose for K8s).
+
+Install (Ubuntu/Debian):
+    sudo apt update
+    sudo apt install -y kubectl
+
+OR latest binary:
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    sudo install -m 0755 kubectl /usr/local/bin/kubectl
+
+Verify:
+    kubectl version --client
+
+
+--------------------------------------------------------------------------------
+3. Minikube (local Kubernetes cluster for learning)
+--------------------------------------------------------------------------------
+
+Runs a single-node K8s cluster on your laptop.
+
+Install:
+    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+    sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
+Verify:
+    minikube version
+
+Start cluster:
+    minikube start --driver=docker
+
+Check cluster:
+    minikube status
+    kubectl get nodes
+
+Expected output:
+    NAME       STATUS   ROLES           AGE   VERSION
+    minikube   Ready    control-plane   ...   v1.x.x
+
+
+--------------------------------------------------------------------------------
+4. Minikube addons (enable after minikube start)
+--------------------------------------------------------------------------------
+
+Metrics server (required for HPA):
+    minikube addons enable metrics-server
+
+Ingress controller (required for Ingress YAML):
+    minikube addons enable ingress
+
+Verify addons:
+    minikube addons list
+
+
+--------------------------------------------------------------------------------
+5. Optional but useful tools
+--------------------------------------------------------------------------------
+
+k9s (terminal UI for Kubernetes):
+    # https://k9scli.io/topics/install/
+
+helm (package manager for K8s — learn later):
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+stern (follow logs from multiple pods):
+    # install from GitHub releases
+
+Lens (GUI desktop app):
+    # https://k8slens.dev/
+
+
+--------------------------------------------------------------------------------
+Tool summary table
+--------------------------------------------------------------------------------
+
+| Tool      | Required? | Purpose                              |
+|-----------|-----------|--------------------------------------|
+| Docker    | YES       | Container runtime, minikube driver   |
+| kubectl   | YES       | Apply/manage K8s resources           |
+| minikube  | YES       | Local K8s cluster for learning       |
+| metrics-server | For HPA | CPU metrics for auto-scaling     |
+| ingress addon  | For Ingress | HTTP routing to todo.local     |
+| k9s       | Optional  | Visual pod/service management        |
+| helm      | Optional  | Advanced packaging (later)           |
+
+
+================================================================================
+PART 2 — WHAT EACH FILE IN k8s/ FOLDER DOES
+================================================================================
+
+Folder structure:
+
+    k8s/
+    ├── 00-namespace.yaml
+    ├── 01-configmap.yaml
+    ├── 02-secret.yaml.example
+    ├── 03-mysql-init-configmap.yaml
+    ├── 04-mysql-service.yaml
+    ├── 05-mysql-statefulset.yaml
+    ├── 06-app-deployment.yaml
+    ├── 07-app-service.yaml
+    ├── 08-ingress.yaml
+    └── 09-hpa.yaml
+
+Apply order matters — files are numbered 00-09 for that reason.
+
+
+--------------------------------------------------------------------------------
+00-namespace.yaml
+--------------------------------------------------------------------------------
+
+What:  Creates isolated namespace "todo"
+Why:   Keeps all ToDo resources separate from other projects
+Like:  A folder for your app inside the cluster
+
+Contains:
+    Namespace: todo
+
+Command:
+    kubectl apply -f k8s/00-namespace.yaml
+
+
+--------------------------------------------------------------------------------
+01-configmap.yaml
+--------------------------------------------------------------------------------
+
+What:  Non-sensitive environment variables
+Why:   Replaces parts of .env file (safe to commit to Git)
+Like:  docker-compose environment section (non-secret values)
+
+Stores:
+    DB_HOST=mysql-service
+    DB_NAME=todo_db
+    DB_POOL_SIZE=5
+    JWT_ALGORITHM=HS256
+    ACCESS_TOKEN_EXPIRES_IN=5m
+    REFRESH_TOKEN_EXPIRES_IN=7d
+
+Used by: todo-app Deployment (envFrom)
+
+
+--------------------------------------------------------------------------------
+02-secret.yaml.example
+--------------------------------------------------------------------------------
+
+What:  TEMPLATE for sensitive values — NOT for production use as-is
+Why:   Shows structure of Secret; real secrets via kubectl
+Like:  .env.example for passwords
+
+Stores (when applied):
+    DB_USER
+    DB_PASSWORD
+    JWT_SECRET
+
+IMPORTANT:
+    - Do NOT commit real passwords
+    - Copy to secret.yaml locally OR use kubectl create secret (recommended)
+
+Create real secret:
+    kubectl create secret generic todo-secrets -n todo \
+      --from-literal=DB_USER=root \
+      --from-literal=DB_PASSWORD=MyStrongPassword123 \
+      --from-literal=JWT_SECRET=mysecretkey
+
+
+--------------------------------------------------------------------------------
+03-mysql-init-configmap.yaml
+--------------------------------------------------------------------------------
+
+What:  database/schema.sql embedded as ConfigMap
+Why:   MySQL runs schema on FIRST startup (creates tables)
+Like:  docker-compose volume mount to /docker-entrypoint-initdb.d/
+
+Creates tables:
+    todos
+    users
+
+Mounted into MySQL pod at:
+    /docker-entrypoint-initdb.d/schema.sql
+
+
+--------------------------------------------------------------------------------
+04-mysql-service.yaml
+--------------------------------------------------------------------------------
+
+What:  Headless Service for MySQL
+Why:   Stable DNS name "mysql-service" for app to connect
+Like:  docker-compose service name "mysql" -> DB_HOST=mysql
+
+Type:     ClusterIP: None (headless — for StatefulSet)
+DNS name: mysql-service.todo.svc.cluster.local
+Port:     3306
+
+App uses:
+    DB_HOST=mysql-service
+
+
+--------------------------------------------------------------------------------
+05-mysql-statefulset.yaml
+--------------------------------------------------------------------------------
+
+What:  Runs MySQL 8.0 with persistent storage
+Why:   Database needs stable identity and data that survives restarts
+Like:  docker-compose mysql service + volume
+
+Includes:
+    - 1 replica (mysql-0)
+    - PVC 1Gi per pod (volumeClaimTemplates)
+    - readiness/liveness probes (mysqladmin ping)
+    - resource limits (512Mi-1Gi RAM)
+    - mounts init schema from ConfigMap
+
+Pod name: mysql-0 (stable)
+
+
+--------------------------------------------------------------------------------
+06-app-deployment.yaml
+--------------------------------------------------------------------------------
+
+What:  Runs your FastAPI app (2 replicas by default)
+Why:   Main application workload with auto-restart and scaling
+Like:  docker-compose app service
+
+Image:  vickygeek/todo_fast_api:latest (from Docker Hub)
+
+Includes:
+    - initContainer wait-for-mysql (waits until port 3306 open)
+    - env from ConfigMap + Secret
+    - readiness probe on /docs
+    - liveness probe on /docs
+    - rolling update strategy
+
+Replicas: 2 (load balanced via Service)
+
+
+--------------------------------------------------------------------------------
+07-app-service.yaml
+--------------------------------------------------------------------------------
+
+What:  Exposes todo-app pods on port 8000
+Why:   Stable endpoint for API traffic
+Like:  docker-compose ports 8000:8000
+
+Type:       NodePort
+Port:       8000
+NodePort:   30080 (access via minikube IP:30080)
+
+Routes traffic to any pod with label app=todo-app
+
+
+--------------------------------------------------------------------------------
+08-ingress.yaml
+--------------------------------------------------------------------------------
+
+What:  HTTP routing from hostname to app service
+Why:   Access API via http://todo.local instead of IP:port
+Like:  Nginx reverse proxy
+
+Requires:
+    minikube addons enable ingress
+
+Host:   todo.local
+Path:   / -> todo-app-service:8000
+
+Add to /etc/hosts:
+    $(minikube ip)  todo.local
+
+Access:
+    http://todo.local/docs
+
+
+--------------------------------------------------------------------------------
+09-hpa.yaml
+--------------------------------------------------------------------------------
+
+What:  Horizontal Pod Autoscaler
+Why:   Auto scale app pods when CPU goes above 70%
+Like:  Auto "run more containers" under load
+
+Requires:
+    minikube addons enable metrics-server
+
+Scales:
+    minReplicas: 2
+    maxReplicas: 5
+    target CPU: 70%
+
+Optional — apply after basic deploy works.
+
+
+================================================================================
+PART 3 — HOW FILES CONNECT (ARCHITECTURE)
+================================================================================
+
+    [ Browser / curl ]
+           |
+    +------+------+
+    |             |
+ Ingress      NodePort :30080
+ (todo.local)      |
+    |             |
+    +------+------+
+           |
+    todo-app-service:8000
+           |
+    +------+------+
+    |             |
+ todo-app-xxx  todo-app-yyy   (Deployment replicas)
+    |             |
+    +------+------+
+           |
+    DB_HOST=mysql-service:3306
+           |
+    mysql-service (headless)
+           |
+       mysql-0 (StatefulSet)
+           |
+    PVC mysql-data (persistent)
+
+
+Config flow:
+    ConfigMap todo-config     -> app env (DB_HOST, DB_NAME, JWT_ALGORITHM...)
+    Secret todo-secrets       -> app env (DB_USER, DB_PASSWORD, JWT_SECRET)
+    ConfigMap mysql-init      -> mysql schema on first start
+
+
+================================================================================
+PART 4 — DEPLOY STEP BY STEP
+================================================================================
+
+Prerequisites:
+    [x] Docker installed
+    [x] kubectl installed
+    [x] minikube started
+    [x] Image on Docker Hub: vickygeek/todo_fast_api:latest
+
+IMPORTANT — rebuild image after database.py lazy pool fix:
+    docker compose build app
+    docker tag todo-app vickygeek/todo_fast_api:latest
+    docker push vickygeek/todo_fast_api:latest
+
+
+Step 1: Start minikube
+    minikube start --driver=docker
+    minikube addons enable metrics-server
+    minikube addons enable ingress
+
+
+Step 2: Create namespace
+    kubectl apply -f k8s/00-namespace.yaml
+
+
+Step 3: Create secret (use your real passwords)
+    kubectl create secret generic todo-secrets -n todo \
+      --from-literal=DB_USER=root \
+      --from-literal=DB_PASSWORD=MyStrongPassword123 \
+      --from-literal=JWT_SECRET=mysecretkey
+
+
+Step 4: Apply ConfigMaps
+    kubectl apply -f k8s/01-configmap.yaml
+    kubectl apply -f k8s/03-mysql-init-configmap.yaml
+
+
+Step 5: Deploy MySQL
+    kubectl apply -f k8s/04-mysql-service.yaml
+    kubectl apply -f k8s/05-mysql-statefulset.yaml
+
+Wait for MySQL ready:
+    kubectl wait --for=condition=ready pod -l app=mysql -n todo --timeout=180s
+    kubectl get pods -n todo
+
+
+Step 6: Deploy FastAPI app
+    kubectl apply -f k8s/06-app-deployment.yaml
+    kubectl apply -f k8s/07-app-service.yaml
+
+Wait for app pods:
+    kubectl wait --for=condition=ready pod -l app=todo-app -n todo --timeout=120s
+
+
+Step 7: Access API (choose one method)
+
+Method A — port-forward (easiest):
+    kubectl port-forward -n todo service/todo-app-service 8000:8000
+    open http://localhost:8000/docs
+
+Method B — minikube NodePort:
+    minikube service todo-app-service -n todo --url
+
+Method C — Ingress:
+    echo "$(minikube ip) todo.local" | sudo tee -a /etc/hosts
+    kubectl apply -f k8s/08-ingress.yaml
+    open http://todo.local/docs
+
+
+Step 8: Optional — enable auto-scaling
+    kubectl apply -f k8s/09-hpa.yaml
+    kubectl get hpa -n todo
+
+
+Step 9: Test API
+    # register
+    curl -X POST http://localhost:8000/register \
+      -H 'Content-Type: application/json' \
+      -d '{"username":"vicky","email":"v@example.com","password":"Pass123","role":1}'
+
+    # login
+    curl -X POST http://localhost:8000/login \
+      -H 'Content-Type: application/json' \
+      -d '{"email":"v@example.com","password":"Pass123"}'
+
+
+================================================================================
+PART 5 — DAILY KUBECTL COMMANDS
+================================================================================
+
+View everything:
+    kubectl get all -n todo
+
+Logs:
+    kubectl logs -f deployment/todo-app -n todo
+    kubectl logs mysql-0 -n todo
+
+Shell inside pod:
+    kubectl exec -it deployment/todo-app -n todo -- bash
+
+Scale manually:
+    kubectl scale deployment todo-app --replicas=3 -n todo
+
+Update image after new Docker Hub push:
+    kubectl rollout restart deployment/todo-app -n todo
+    # OR
+    kubectl set image deployment/todo-app todo-app=vickygeek/todo_fast_api:2.0 -n todo
+
+Rollback:
+    kubectl rollout undo deployment/todo-app -n todo
+
+Delete everything:
+    kubectl delete namespace todo
+
+Stop cluster:
+    minikube stop
+
+Delete cluster:
+    minikube delete
+
+
+================================================================================
+PART 6 — APPLY ALL FILES AT ONCE (SHORTCUT)
+================================================================================
+
+After secret is created manually:
+
+    kubectl apply -f k8s/00-namespace.yaml
+    kubectl apply -f k8s/01-configmap.yaml
+    kubectl apply -f k8s/03-mysql-init-configmap.yaml
+    kubectl apply -f k8s/04-mysql-service.yaml
+    kubectl apply -f k8s/05-mysql-statefulset.yaml
+    kubectl apply -f k8s/06-app-deployment.yaml
+    kubectl apply -f k8s/07-app-service.yaml
+
+Optional:
+    kubectl apply -f k8s/08-ingress.yaml
+    kubectl apply -f k8s/09-hpa.yaml
+
+Do NOT apply 02-secret.yaml.example with real passwords to Git.
+
+
+================================================================================
+PART 7 — TROUBLESHOOTING
+================================================================================
+
+ImagePullBackOff:
+    -> Check image exists: docker pull vickygeek/todo_fast_api:latest
+    -> For private repos: create imagePullSecret
+
+CrashLoopBackOff on todo-app:
+    -> kubectl logs <pod> -n todo
+    -> Check mysql is running: kubectl get pods -n todo
+    -> Check secret exists: kubectl get secret todo-secrets -n todo
+
+Pending pods:
+    -> kubectl describe pod <name> -n todo
+    -> minikube may need more memory: minikube start --memory=4096
+
+MySQL not ready:
+    -> kubectl logs mysql-0 -n todo
+    -> Wait longer — first start takes 1-2 minutes
+
+HPA not working:
+    -> minikube addons enable metrics-server
+    -> kubectl top pods -n todo
+
+Ingress 404:
+    -> minikube addons enable ingress
+    -> Check /etc/hosts has todo.local -> minikube ip
+
+
+================================================================================
+PART 8 — FILE QUICK REFERENCE TABLE
+================================================================================
+
+| File                        | K8s Kind      | Purpose                        |
+|-----------------------------|---------------|--------------------------------|
+| 00-namespace.yaml           | Namespace     | Isolate todo resources         |
+| 01-configmap.yaml           | ConfigMap     | App env (non-secret)           |
+| 02-secret.yaml.example      | Secret        | Template for passwords         |
+| 03-mysql-init-configmap.yaml| ConfigMap     | SQL schema for MySQL init      |
+| 04-mysql-service.yaml       | Service       | MySQL DNS (mysql-service)        |
+| 05-mysql-statefulset.yaml   | StatefulSet   | MySQL database + storage       |
+| 06-app-deployment.yaml      | Deployment    | FastAPI app pods               |
+| 07-app-service.yaml         | Service       | Expose API port 8000           |
+| 08-ingress.yaml             | Ingress       | HTTP route todo.local          |
+| 09-hpa.yaml                 | HPA           | Auto-scale on CPU              |
+
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Install tools (Part 1)
+2. Rebuild & push Docker image (lazy pool fix in database.py)
+3. Follow deploy steps (Part 4)
+4. Complete exercises in kubernetesNote.text Section 33
+5. Learn concepts in kubernetesNote.text as you use each file
+
+================================================================================
