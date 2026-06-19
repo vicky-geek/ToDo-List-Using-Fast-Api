@@ -1,0 +1,1262 @@
+================================================================================
+KUBERNETES LEARNING GUIDE — ToDo FastAPI Project
+================================================================================
+
+Learn Kubernetes step-by-step using YOUR project:
+
+    App image : vickygeek/todo_fast_api:latest
+    Database  : MySQL 8.0
+    API port  : 8000
+    Env vars  : DB_*, JWT_*
+
+You already know Docker. Kubernetes is the NEXT level:
+Docker runs containers on ONE machine.
+Kubernetes runs containers across MANY machines with auto-healing, scaling, and networking.
+
+
+================================================================================
+LEARNING ROADMAP (FOLLOW IN ORDER)
+================================================================================
+
+Phase 1 — Foundations        : Sections 1-4
+Phase 2 — Core workloads     : Sections 5-9
+Phase 3 — Config & secrets   : Sections 10-12
+Phase 4 — Storage & database : Sections 13-15
+Phase 5 — Networking         : Sections 16-18
+Phase 6 — Health & scaling   : Sections 19-21
+Phase 7 — Updates & jobs     : Sections 22-24
+Phase 8 — Security & advanced: Sections 25-28
+Phase 9 — Deploy full project: Section 29
+Phase 10 — Practice & next   : Section 30
+
+
+================================================================================
+DOCKER vs KUBERNETES — MENTAL MODEL
+================================================================================
+
+| Docker Compose              | Kubernetes equivalent        |
+|-----------------------------|------------------------------|
+| docker-compose.yml          | Multiple YAML manifest files |
+| service (app, mysql)        | Deployment + Service         |
+| container                   | Pod (1+ containers)          |
+| .env file                   | ConfigMap + Secret           |
+| volumes                     | PersistentVolume + PVC       |
+| ports: 8000:8000            | Service + Ingress            |
+| depends_on                  | Init container / probes      |
+| restart: unless-stopped     | Deployment replicas + restart|
+| docker compose up           | kubectl apply -f             |
+| 1 machine                   | Cluster of nodes             |
+
+Your ToDo project in K8s will look like:
+
+    Internet / Browser
+           |
+       Ingress (optional)
+           |
+    Service: todo-app-service (port 8000)
+           |
+    Deployment: todo-app (pods running vickygeek/todo_fast_api)
+           |
+    Service: mysql-service (port 3306)
+           |
+    StatefulSet: mysql (pods with persistent storage)
+
+
+================================================================================
+SECTION 1 — WHAT IS KUBERNETES?
+================================================================================
+
+Kubernetes (K8s) = container orchestration platform.
+
+It automatically:
+    - Starts and restarts crashed containers
+    - Scales app up/down (more copies under load)
+    - Load balances traffic across pods
+    - Rolls out new versions without downtime
+    - Manages secrets and configuration
+    - Attaches persistent storage
+
+Key terms:
+    Cluster   = whole K8s environment (control plane + worker nodes)
+    Node      = one machine (VM or physical) in the cluster
+    Pod       = smallest deployable unit (1+ containers sharing network)
+    Namespace = virtual cluster inside cluster (dev, staging, prod)
+
+
+================================================================================
+SECTION 2 — KUBERNETES ARCHITECTURE
+================================================================================
+
+CONTROL PLANE (brain):
+    API Server      — front door; kubectl talks to this
+    etcd            — stores cluster state
+    Scheduler       — decides which node runs which pod
+    Controller Mgr  — watches desired vs actual state, fixes drift
+
+WORKER NODES (muscle):
+    kubelet         — runs pods on the node
+    kube-proxy      — network routing for Services
+    Container runtime — Docker/containerd (runs containers)
+
+Flow when you deploy ToDo app:
+
+    kubectl apply -f deployment.yaml
+           |
+       API Server
+           |
+       Scheduler  -> picks a node
+           |
+       kubelet    -> pulls vickygeek/todo_fast_api:latest, starts pod
+
+
+================================================================================
+SECTION 3 — LOCAL KUBERNETES SETUP (CHOOSE ONE)
+================================================================================
+
+You need a local cluster to practice. Pick ONE:
+
+--------------------------------------------------------------------------------
+Option A: Minikube (most popular for learning)
+--------------------------------------------------------------------------------
+
+Install:
+    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+    sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
+Start cluster:
+    minikube start --driver=docker
+    minikube status
+    kubectl cluster-info
+
+Enable Ingress addon (later):
+    minikube addons enable ingress
+
+Dashboard (optional):
+    minikube dashboard
+
+Stop / delete:
+    minikube stop
+    minikube delete
+
+
+--------------------------------------------------------------------------------
+Option B: Kind (Kubernetes IN Docker)
+--------------------------------------------------------------------------------
+
+Install:
+    # see https://kind.sigs.k8s.io/docs/user/quick-start/
+
+Create cluster:
+    kind create cluster --name todo-cluster
+    kubectl cluster-info --context kind-todo-cluster
+
+Delete:
+    kind delete cluster --name todo-cluster
+
+
+--------------------------------------------------------------------------------
+Option C: k3s (lightweight, good for Linux)
+--------------------------------------------------------------------------------
+
+    curl -sfL https://get.k3s.io | sh -
+    sudo kubectl get nodes
+
+
+--------------------------------------------------------------------------------
+Install kubectl (required for all options)
+--------------------------------------------------------------------------------
+
+    sudo apt install kubectl
+    # OR
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    sudo install kubectl /usr/local/bin/kubectl
+
+Verify:
+    kubectl version --client
+    kubectl get nodes
+
+
+================================================================================
+SECTION 4 — KUBECTL BASICS (DAILY COMMANDS)
+================================================================================
+
+kubectl = Kubernetes CLI (like docker compose for K8s)
+
+Get resources:
+    kubectl get pods
+    kubectl get deployments
+    kubectl get services
+    kubectl get all
+    kubectl get all -n todo          # specific namespace
+
+Describe (debug):
+    kubectl describe pod <pod-name>
+    kubectl describe deployment todo-app
+
+Logs:
+    kubectl logs <pod-name>
+    kubectl logs -f deployment/todo-app    # follow logs
+
+Execute inside pod:
+    kubectl exec -it <pod-name> -- bash
+    kubectl exec -it <pod-name> -- printenv DB_HOST
+
+Apply manifests:
+    kubectl apply -f file.yaml
+    kubectl apply -f k8s/               # whole folder
+
+Delete:
+    kubectl delete -f file.yaml
+    kubectl delete deployment todo-app
+
+Watch:
+    kubectl get pods -w
+
+Help:
+    kubectl explain pod
+    kubectl explain deployment.spec
+
+
+================================================================================
+SECTION 5 — POD (SMALLEST UNIT)
+================================================================================
+
+A Pod wraps one or more containers. In practice: 1 container per pod for your app.
+
+Docker equivalent:
+    docker run vickygeek/todo_fast_api:latest
+
+K8s Pod (learning only — don't use bare Pods in production):
+
+File: k8s/01-pod.yaml
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: todo-app-pod
+      labels:
+        app: todo-app
+    spec:
+      containers:
+        - name: todo-app
+          image: vickygeek/todo_fast_api:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_HOST
+              value: "mysql-service"
+
+Practice:
+    kubectl apply -f k8s/01-pod.yaml
+    kubectl get pods
+    kubectl logs todo-app-pod
+
+Problem with bare Pods:
+    - If pod dies, it does NOT come back
+    - No scaling
+    -> Use Deployment instead (Section 6)
+
+
+================================================================================
+SECTION 6 — DEPLOYMENT (MANAGE PODS — MAIN WORKLOAD)
+================================================================================
+
+Deployment manages ReplicaSets which manage Pods.
+You declare: "I want 3 copies of my app" — K8s keeps it true.
+
+Maps to your FastAPI app container.
+
+File: k8s/02-deployment.yaml
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: todo-app
+      labels:
+        app: todo-app
+    spec:
+      replicas: 2                    # run 2 copies
+      selector:
+        matchLabels:
+          app: todo-app
+      template:
+        metadata:
+          labels:
+            app: todo-app
+        spec:
+          containers:
+            - name: todo-app
+              image: vickygeek/todo_fast_api:latest
+              ports:
+                - containerPort: 8000
+              env:
+                - name: DB_HOST
+                  value: "mysql-service"
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: todo-secrets
+                      key: DB_USER
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: todo-secrets
+                      key: DB_PASSWORD
+                - name: DB_NAME
+                  value: "todo_db"
+                - name: JWT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: todo-secrets
+                      key: JWT_SECRET
+
+Practice:
+    kubectl apply -f k8s/02-deployment.yaml
+    kubectl get deployments
+    kubectl get pods
+    kubectl scale deployment todo-app --replicas=3
+    kubectl delete pod <pod-name>     # watch K8s recreate it!
+
+Key concepts:
+    replicas     = how many pod copies
+    selector     = how Deployment finds its pods
+    template     = pod blueprint
+
+
+================================================================================
+SECTION 7 — REPLICASET (UNDERSTAND, RARELY WRITE DIRECTLY)
+================================================================================
+
+ReplicaSet ensures N pods with matching labels are running.
+Deployment creates and manages ReplicaSets for you.
+
+You usually create Deployment, NOT ReplicaSet directly.
+
+    Deployment -> ReplicaSet -> Pods
+
+Check:
+    kubectl get replicasets
+
+
+================================================================================
+SECTION 8 — SERVICE (STABLE NETWORK ACCESS TO PODS)
+================================================================================
+
+Pods get new IP addresses when they restart. Service gives a STABLE DNS name.
+
+Your app pods:     todo-app-xxxxx, todo-app-yyyyy (IPs change)
+Service name:    todo-app-service (stable — always works)
+
+Docker Compose equivalent:
+    service name "mysql" -> DB_HOST=mysql
+
+K8s equivalent:
+    Service name "mysql-service" -> DB_HOST=mysql-service
+
+--------------------------------------------------------------------------------
+Service types:
+--------------------------------------------------------------------------------
+
+| Type         | Use case                          | ToDo project           |
+|--------------|-----------------------------------|------------------------|
+| ClusterIP    | Internal only (default)           | app -> mysql           |
+| NodePort     | Expose on node IP:port            | local testing          |
+| LoadBalancer | Cloud LB (AWS, GCP)               | production API         |
+
+File: k8s/03-service-app.yaml
+
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: todo-app-service
+    spec:
+      type: NodePort
+      selector:
+        app: todo-app
+      ports:
+        - port: 8000
+          targetPort: 8000
+          nodePort: 30080
+
+File: k8s/04-service-mysql.yaml
+
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: mysql-service
+    spec:
+      type: ClusterIP
+      selector:
+        app: mysql
+      ports:
+        - port: 3306
+          targetPort: 3306
+
+Practice:
+    kubectl apply -f k8s/03-service-app.yaml
+    kubectl get services
+
+Access app (minikube):
+    minikube service todo-app-service --url
+    # OR
+    kubectl port-forward service/todo-app-service 8000:8000
+    # then http://localhost:8000/docs
+
+DNS inside cluster:
+    mysql-service.todo.svc.cluster.local:3306
+    Short name in same namespace: mysql-service
+
+
+================================================================================
+SECTION 9 — LABELS AND SELECTORS
+================================================================================
+
+Labels = tags on resources. Selectors = how resources find each other.
+
+    labels:
+      app: todo-app
+      tier: backend
+      env: dev
+
+Deployment selector matches Pod labels.
+Service selector matches Pod labels.
+
+Practice:
+    kubectl get pods --show-labels
+    kubectl get pods -l app=todo-app
+
+
+================================================================================
+SECTION 10 — NAMESPACE (ORGANIZE RESOURCES)
+================================================================================
+
+Separate dev / staging / prod in one cluster.
+
+    kubectl create namespace todo
+    kubectl get namespaces
+
+Run all ToDo resources in todo namespace:
+
+    kubectl apply -f k8s/ -n todo
+    kubectl get all -n todo
+
+In YAML add to metadata:
+    namespace: todo
+
+
+================================================================================
+SECTION 11 — CONFIGMAP (NON-SENSITIVE CONFIG)
+================================================================================
+
+Replaces non-secret parts of .env file.
+
+Docker:  .env with DB_NAME, DB_POOL_SIZE
+K8s:     ConfigMap for non-sensitive values
+
+File: k8s/05-configmap.yaml
+
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: todo-config
+      namespace: todo
+    data:
+      DB_HOST: mysql-service
+      DB_NAME: todo_db
+      DB_POOL_SIZE: "5"
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRES_IN: 5m
+      REFRESH_TOKEN_EXPIRES_IN: 7d
+
+Use in Deployment:
+
+    envFrom:
+      - configMapRef:
+          name: todo-config
+
+Or single key:
+    env:
+      - name: DB_NAME
+        valueFrom:
+          configMapKeyRef:
+            name: todo-config
+            key: DB_NAME
+
+Practice:
+    kubectl apply -f k8s/05-configmap.yaml
+    kubectl describe configmap todo-config -n todo
+
+
+================================================================================
+SECTION 12 — SECRET (PASSWORDS, JWT, TOKENS)
+================================================================================
+
+Replaces sensitive .env values. Stored base64 encoded (NOT encryption — use RBAC).
+
+Docker:  .env DB_PASSWORD, JWT_SECRET
+K8s:     Secret
+
+Create from literal:
+
+    kubectl create secret generic todo-secrets -n todo \
+      --from-literal=DB_USER=root \
+      --from-literal=DB_PASSWORD=MyStrongPassword123 \
+      --from-literal=JWT_SECRET=mysecretkey
+
+Or from file k8s/06-secret.yaml (base64 values):
+
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: todo-secrets
+      namespace: todo
+    type: Opaque
+    data:
+      DB_USER: cm9vdA==                          # echo -n 'root' | base64
+      DB_PASSWORD: TXlTdHJvbmdQYXNzd29yZDEyMw==
+      JWT_SECRET: bXlzZWNyZXRrZXk=
+
+Use in Deployment:
+
+    env:
+      - name: DB_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: todo-secrets
+            key: DB_PASSWORD
+
+NEVER commit real secrets to Git. Use:
+    - kubectl create secret (local)
+    - Sealed Secrets / External Secrets (production)
+    - Cloud secret managers (AWS Secrets Manager, etc.)
+
+Practice:
+    kubectl get secrets -n todo
+    kubectl describe secret todo-secrets -n todo
+
+
+================================================================================
+SECTION 13 — VOLUMES, PV, PVC (PERSISTENT STORAGE)
+================================================================================
+
+Docker:  volumes: mysql_data
+K8s:     PersistentVolume (PV) + PersistentVolumeClaim (PVC)
+
+Why needed for ToDo:
+    MySQL data must survive pod restarts.
+
+Concepts:
+    PV   = piece of storage in cluster
+    PVC  = pod's request for storage
+    StorageClass = dynamic provisioning (minikube has default)
+
+File: k8s/07-pvc-mysql.yaml
+
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: mysql-pvc
+      namespace: todo
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
+
+Practice:
+    kubectl apply -f k8s/07-pvc-mysql.yaml
+    kubectl get pvc -n todo
+
+
+================================================================================
+SECTION 14 — STATEFULSET (FOR MYSQL — ORDERED, STABLE IDENTITY)
+================================================================================
+
+Use StatefulSet for databases (not Deployment).
+
+Why StatefulSet for MySQL:
+    - Stable pod name: mysql-0
+    - Stable storage per pod
+    - Ordered start/stop
+
+Docker:  mysql service with volume
+K8s:     StatefulSet + PVC + headless Service
+
+File: k8s/08-statefulset-mysql.yaml
+
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: mysql
+      namespace: todo
+    spec:
+      serviceName: mysql-service
+      replicas: 1
+      selector:
+        matchLabels:
+          app: mysql
+      template:
+        metadata:
+          labels:
+            app: mysql
+        spec:
+          containers:
+            - name: mysql
+              image: mysql:8.0
+              ports:
+                - containerPort: 3306
+              env:
+                - name: MYSQL_ROOT_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: todo-secrets
+                      key: DB_PASSWORD
+                - name: MYSQL_DATABASE
+                  value: todo_db
+              volumeMounts:
+                - name: mysql-storage
+                  mountPath: /var/lib/mysql
+      volumeClaimTemplates:
+        - metadata:
+            name: mysql-storage
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+
+Headless Service for StatefulSet (k8s/08b-mysql-headless.yaml):
+
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: mysql-service
+      namespace: todo
+    spec:
+      clusterIP: None
+      selector:
+        app: mysql
+      ports:
+        - port: 3306
+
+App connects with:
+    DB_HOST=mysql-service
+
+
+================================================================================
+SECTION 15 — INIT CONTAINERS (RUN SCHEMA BEFORE APP)
+================================================================================
+
+Docker:  schema.sql mounted to /docker-entrypoint-initdb.d/
+K8s:     Init container or Job to run SQL
+
+Init container example (runs before app starts):
+
+    initContainers:
+      - name: wait-for-mysql
+        image: busybox
+        command: ['sh', '-c', 'until nc -z mysql-service 3306; do sleep 2; done']
+
+This fixes your Docker issue where app started before MySQL was ready!
+
+Better approach for schema:
+    - Kubernetes Job that runs mysql client once
+    - Or bake schema into MySQL custom image
+    - Or use migration tool (Flyway, Alembic)
+
+
+================================================================================
+SECTION 16 — INGRESS (HTTP ROUTING — LIKE NGINX FOR CLUSTER)
+================================================================================
+
+Expose HTTP routes to outside world with domain/path rules.
+
+Docker:  ports: 8000:8000
+K8s:     Ingress -> Service -> Pods
+
+Requires Ingress Controller (nginx, traefik).
+
+Minikube:
+    minikube addons enable ingress
+
+File: k8s/09-ingress.yaml
+
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: todo-ingress
+      namespace: todo
+    spec:
+      rules:
+        - host: todo.local
+          http:
+            paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: todo-app-service
+                    port:
+                      number: 8000
+
+Add to /etc/hosts:
+    <minikube-ip>  todo.local
+
+Access:
+    http://todo.local/docs
+
+Production:
+    Use real domain + TLS certificate (cert-manager + Let's Encrypt)
+
+
+================================================================================
+SECTION 17 — NETWORKING SUMMARY FOR TODO PROJECT
+================================================================================
+
+External user
+    -> Ingress (todo.yourdomain.com)
+    -> Service todo-app-service:8000
+    -> Pod todo-app (vickygeek/todo_fast_api)
+
+todo-app pod
+    -> DB_HOST=mysql-service:3306
+    -> Service mysql-service
+    -> Pod mysql-0 (StatefulSet)
+
+All internal traffic uses Cluster DNS.
+Pods in namespace todo can reach mysql-service by short name.
+
+
+================================================================================
+SECTION 18 — PORT-FORWARD (LOCAL DEBUG WITHOUT INGRESS)
+================================================================================
+
+Quick access during learning:
+
+    kubectl port-forward -n todo service/todo-app-service 8000:8000
+
+Open: http://localhost:8000/docs
+
+Forward MySQL (for debugging):
+    kubectl port-forward -n todo service/mysql-service 3306:3306
+
+
+================================================================================
+SECTION 19 — PROBES (HEALTH CHECKS — LIVENESS & READINESS)
+================================================================================
+
+Docker:  healthcheck in docker-compose for mysql
+K8s:     livenessProbe + readinessProbe on pods
+
+| Probe           | Purpose                              |
+|-----------------|--------------------------------------|
+| readinessProbe  | Is pod ready for traffic?            |
+| livenessProbe   | Is pod alive? Restart if fails       |
+| startupProbe    | Slow-starting apps (optional)        |
+
+Add to todo-app Deployment:
+
+    livenessProbe:
+      httpGet:
+        path: /docs
+        port: 8000
+      initialDelaySeconds: 15
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /docs
+        port: 8000
+      initialDelaySeconds: 5
+      periodSeconds: 5
+
+MySQL readiness:
+
+    readinessProbe:
+      exec:
+        command: ["mysqladmin", "ping", "-h", "127.0.0.1"]
+      initialDelaySeconds: 30
+      periodSeconds: 10
+
+This prevents sending traffic to app before it is ready.
+
+
+================================================================================
+SECTION 20 — RESOURCE REQUESTS AND LIMITS
+================================================================================
+
+Define CPU/memory per container. Scheduler uses this to place pods.
+
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "500m"
+
+requests = guaranteed minimum
+limits   = maximum allowed
+
+MySQL needs more:
+    requests: memory 512Mi, cpu 250m
+    limits:   memory 1Gi,   cpu 500m
+
+Check usage:
+    kubectl top pods -n todo    # needs metrics-server
+
+
+================================================================================
+SECTION 21 — HPA (HORIZONTAL POD AUTOSCALER — AUTO SCALING)
+================================================================================
+
+Automatically scale todo-app replicas based on CPU/memory.
+
+Requires metrics-server:
+    minikube addons enable metrics-server
+
+File: k8s/10-hpa.yaml
+
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: todo-app-hpa
+      namespace: todo
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: todo-app
+      minReplicas: 2
+      maxReplicas: 5
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+
+Practice:
+    kubectl apply -f k8s/10-hpa.yaml
+    kubectl get hpa -n todo
+
+Load test to trigger scale:
+    # generate traffic to /todos endpoint
+
+
+================================================================================
+SECTION 22 — ROLLING UPDATES AND ROLLBACK
+================================================================================
+
+Deploy new image version without downtime.
+
+Update image:
+    kubectl set image deployment/todo-app todo-app=vickygeek/todo_fast_api:2.0 -n todo
+
+Or change image in YAML and:
+    kubectl apply -f k8s/02-deployment.yaml
+
+Watch rollout:
+    kubectl rollout status deployment/todo-app -n todo
+
+Rollback:
+    kubectl rollout undo deployment/todo-app -n todo
+
+History:
+    kubectl rollout history deployment/todo-app -n todo
+
+Deployment strategy (in YAML):
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+
+Maps to: push new image to Docker Hub -> update K8s deployment -> rolling replace pods
+
+
+================================================================================
+SECTION 23 — JOBS AND CRONJOBS
+================================================================================
+
+Job = run a task once to completion.
+CronJob = run on schedule.
+
+Use for ToDo project:
+    - Run database schema migration once
+    - Cleanup old data nightly
+
+Job example (run schema):
+
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: mysql-schema-job
+      namespace: todo
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: schema
+              image: mysql:8.0
+              command: ["sh", "-c", "mysql -h mysql-service -u root -p$DB_PASSWORD todo_db < /schema.sql"]
+              env:
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: todo-secrets
+                      key: DB_PASSWORD
+
+CronJob = same but with schedule: "0 2 * * *" (2 AM daily)
+
+
+================================================================================
+SECTION 24 — DAEMONSET (AWARENESS ONLY)
+================================================================================
+
+Runs one pod on EVERY node. Used for:
+    - Log collectors (fluentd)
+    - Monitoring agents (node-exporter)
+    - Network plugins
+
+Not needed for ToDo app directly, but good to know for interviews.
+
+
+================================================================================
+SECTION 25 — RBAC (ROLE-BASED ACCESS CONTROL)
+================================================================================
+
+Control who can do what in the cluster.
+
+Components:
+    ServiceAccount — identity for pods or users
+    Role           — permissions in a namespace
+    ClusterRole    — permissions cluster-wide
+    RoleBinding    — links account to role
+
+Example: create read-only access to todo namespace for a teammate.
+
+Production:
+    - Don't use default service account for app
+    - Limit pod permissions (principle of least privilege)
+    - MySQL pod doesn't need K8s API access
+
+Practice:
+    kubectl get serviceaccounts -n todo
+    kubectl auth can-i get pods -n todo
+
+
+================================================================================
+SECTION 26 — NETWORK POLICIES (SECURITY)
+================================================================================
+
+Firewall rules between pods.
+
+Example: only todo-app pods can connect to mysql pods.
+
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: mysql-network-policy
+      namespace: todo
+    spec:
+      podSelector:
+        matchLabels:
+          app: mysql
+      ingress:
+        - from:
+            - podSelector:
+                matchLabels:
+                  app: todo-app
+          ports:
+            - port: 3306
+
+Requires CNI plugin that supports NetworkPolicy (Calico, Cilium).
+
+
+================================================================================
+SECTION 27 — HELM (PACKAGE MANAGER FOR KUBERNETES)
+================================================================================
+
+Helm = templated K8s charts. Like npm for K8s manifests.
+
+Instead of 10 YAML files, one chart with values.yaml:
+
+    helm install todo ./todo-chart -n todo -f values.prod.yaml
+    helm upgrade todo ./todo-chart
+    helm rollback todo 1
+    helm uninstall todo
+
+Learn AFTER you understand raw YAML manifests.
+
+Your values.yaml would hold:
+    image: vickygeek/todo_fast_api
+    tag: latest
+    replicas: 2
+    dbPassword: (from secret)
+
+
+================================================================================
+SECTION 28 — PRODUCTION TOPICS (ADVANCED — LEARN LATER)
+================================================================================
+
+| Topic                  | What it does                        |
+|------------------------|-------------------------------------|
+| cert-manager           | Auto TLS certificates               |
+| External Secrets       | Sync secrets from AWS/Vault         |
+| Service Mesh (Istio)   | Advanced traffic management         |
+| GitOps (ArgoCD/Flux)   | Deploy from Git automatically       |
+| Kustomize              | Overlay configs per environment     |
+| Multi-cluster          | DR, geo distribution                |
+| Pod Disruption Budget  | Safe maintenance during node drain  |
+| Resource Quotas        | Limit namespace resource usage      |
+
+Cloud managed K8s:
+    - AWS EKS
+    - Google GKE
+    - Azure AKS
+
+
+================================================================================
+SECTION 29 — FULL PROJECT DEPLOYMENT (STEP BY STEP)
+================================================================================
+
+Goal: Deploy ToDo FastAPI + MySQL on local Minikube.
+
+Prerequisites:
+    - Docker image pushed: vickygeek/todo_fast_api:latest
+    - minikube running
+    - kubectl installed
+
+Step 1: Start cluster
+    minikube start --driver=docker
+    minikube addons enable metrics-server
+    minikube addons enable ingress
+
+Step 2: Create namespace
+    kubectl create namespace todo
+
+Step 3: Create secrets
+    kubectl create secret generic todo-secrets -n todo \
+      --from-literal=DB_USER=root \
+      --from-literal=DB_PASSWORD=MyStrongPassword123 \
+      --from-literal=JWT_SECRET=mysecretkey
+
+Step 4: Apply ConfigMap
+    kubectl apply -f k8s/05-configmap.yaml
+
+Step 5: Deploy MySQL (StatefulSet + Service + wait for ready)
+    kubectl apply -f k8s/08-statefulset-mysql.yaml
+    kubectl apply -f k8s/08b-mysql-headless.yaml
+    kubectl wait --for=condition=ready pod -l app=mysql -n todo --timeout=120s
+
+Step 6: Run schema (Job or manual exec)
+    kubectl exec -it mysql-0 -n todo -- mysql -u root -p -e "SHOW DATABASES;"
+
+Step 7: Deploy app
+    kubectl apply -f k8s/02-deployment.yaml
+    kubectl apply -f k8s/03-service-app.yaml
+
+Step 8: Access API
+    kubectl port-forward -n todo service/todo-app-service 8000:8000
+    open http://localhost:8000/docs
+
+Step 9: Test
+    curl -X POST http://localhost:8000/register ...
+    curl http://localhost:8000/todos -H "Authorization: Bearer ..."
+
+Step 10: Scale
+    kubectl scale deployment todo-app --replicas=3 -n todo
+    kubectl get pods -n todo
+
+Step 11: Update image (after new Docker Hub push)
+    kubectl set image deployment/todo-app todo-app=vickygeek/todo_fast_api:2.0 -n todo
+
+Step 12: Cleanup
+    kubectl delete namespace todo
+    # OR
+    minikube delete
+
+
+================================================================================
+SECTION 30 — SUGGESTED FOLDER STRUCTURE FOR K8S MANIFESTS
+================================================================================
+
+Create in your project:
+
+    ToDo/
+    └── k8s/
+        ├── namespace.yaml
+        ├── configmap.yaml
+        ├── secret.yaml.example      # template only, no real secrets
+        ├── mysql-statefulset.yaml
+        ├── mysql-service.yaml
+        ├── app-deployment.yaml
+        ├── app-service.yaml
+        ├── ingress.yaml
+        ├── hpa.yaml
+        └── README.md
+
+Apply all:
+    kubectl apply -f k8s/ -n todo
+
+
+================================================================================
+SECTION 31 — COMMON K8S ERRORS (TODO PROJECT)
+================================================================================
+
+Error: ImagePullBackOff
+    Cause: Cannot pull vickygeek/todo_fast_api
+    Fix:  docker login on node, check image name/tag, push image
+
+Error: CrashLoopBackOff
+    Cause: App crashes on start (like MySQL connection at import)
+    Fix:  init container wait-for-mysql, lazy DB pool, check logs
+          kubectl logs <pod> -n todo
+
+Error: ErrImageNeverPull (minikube)
+    Fix:  eval $(minikube docker-env) && docker build locally
+          OR use imagePullPolicy: Always with Docker Hub image
+
+Error: Connection refused to mysql
+    Cause: mysql not ready, wrong DB_HOST
+    Fix:  DB_HOST=mysql-service, wait for mysql pod ready
+
+Error: CreateContainerConfigError
+    Cause: Secret or ConfigMap key missing
+    Fix:  kubectl describe pod, check secret keys exist
+
+Error: Pending pod
+    Cause: Not enough CPU/memory, PVC not bound
+    Fix:  kubectl describe pod, check events
+
+Error: 502 from Ingress
+    Fix:  readiness probe failing, service selector wrong
+
+
+================================================================================
+SECTION 32 — CODE CHANGE NEEDED FOR K8S (YOUR PROJECT)
+================================================================================
+
+Your database.py creates connection pool at IMPORT time.
+This crashes if MySQL is not ready when pod starts.
+
+Recommended fix before K8s (same as Docker issue):
+
+    Option A: Lazy pool — create pool on first get_connection()
+    Option B: Init container — wait until mysql-service:3306 is open
+    Option C: FastAPI lifespan — connect on startup with retry
+
+Also ensure main.py:
+    load_dotenv() before imports (already fixed)
+
+For K8s prefer ConfigMap + Secret over .env file inside container.
+
+
+================================================================================
+SECTION 33 — LEARNING EXERCISES (PRACTICE CHECKLIST)
+================================================================================
+
+[ ] 1.  Install minikube + kubectl
+[ ] 2.  Run first Pod with todo image
+[ ] 3.  Convert Pod to Deployment with 2 replicas
+[ ] 4.  Add Service (NodePort) and access /docs
+[ ] 5.  Create ConfigMap and Secret, inject as env
+[ ] 6.  Deploy MySQL StatefulSet with PVC
+[ ] 7.  Connect app to mysql-service
+[ ] 8.  Add readiness/liveness probes
+[ ] 9.  Scale to 3 replicas manually
+[ ] 10. Set up HPA and trigger scale with load
+[ ] 11. Push new image tag, do rolling update
+[ ] 12. Rollback deployment
+[ ] 13. Add Ingress with todo.local
+[ ] 14. Add init container wait-for-mysql
+[ ] 15. Delete pod and watch K8s recreate it
+[ ] 16. port-forward and test register/login API
+[ ] 17. Create namespace todo, deploy everything inside
+[ ] 18. View logs and describe pod for debugging
+[ ] 19. Create Job to run schema.sql
+[ ] 20. Clean up namespace / delete cluster
+
+
+================================================================================
+SECTION 34 — KUBERNETES TOPICS COVERAGE MAP
+================================================================================
+
+| Topic              | Section | Practiced with ToDo        |
+|--------------------|---------|----------------------------|
+| Architecture       | 2       | Conceptual                 |
+| kubectl            | 4       | All exercises              |
+| Pod                | 5       | todo-app-pod               |
+| Deployment         | 6       | todo-app deployment        |
+| ReplicaSet         | 7       | Auto via Deployment        |
+| Service            | 8       | app + mysql services       |
+| Labels/Selectors   | 9       | app=todo-app               |
+| Namespace          | 10      | todo namespace             |
+| ConfigMap          | 11      | DB_NAME, JWT_ALGORITHM     |
+| Secret             | 12      | DB_PASSWORD, JWT_SECRET    |
+| PV/PVC             | 13      | mysql storage              |
+| StatefulSet        | 14      | mysql database             |
+| Init Container     | 15      | wait-for-mysql             |
+| Ingress            | 16      | expose /docs               |
+| Networking         | 17-18   | Cluster DNS, port-forward  |
+| Probes             | 19      | app + mysql health         |
+| Resources          | 20      | CPU/memory limits          |
+| HPA                | 21      | scale todo-app             |
+| Rolling update     | 22      | new Docker Hub image       |
+| Jobs/CronJobs      | 23      | schema migration           |
+| DaemonSet          | 24      | awareness                  |
+| RBAC               | 25      | access control             |
+| NetworkPolicy      | 26      | mysql access only from app |
+| Helm               | 27      | package manifests          |
+| Production topics  | 28      | EKS/GKE, GitOps            |
+
+
+================================================================================
+SECTION 35 — QUICK CHEAT SHEET
+================================================================================
+
+# Cluster
+minikube start
+kubectl get nodes
+
+# Deploy
+kubectl create namespace todo
+kubectl apply -f k8s/ -n todo
+kubectl get all -n todo
+
+# Debug
+kubectl logs -f deployment/todo-app -n todo
+kubectl describe pod <name> -n todo
+kubectl exec -it <pod> -n todo -- bash
+
+# Access
+kubectl port-forward -n todo svc/todo-app-service 8000:8000
+
+# Scale
+kubectl scale deployment todo-app --replicas=3 -n todo
+
+# Update
+kubectl set image deployment/todo-app todo-app=vickygeek/todo_fast_api:2.0 -n todo
+
+# Rollback
+kubectl rollout undo deployment/todo-app -n todo
+
+# Cleanup
+kubectl delete namespace todo
+
+================================================================================
+NEXT STEP FOR YOU
+================================================================================
+
+1. Finish Docker comfortably (you are here ✅)
+2. Install minikube + kubectl
+3. Create k8s/ folder in this project
+4. Follow Section 29 step-by-step
+5. Complete practice checklist Section 33
+
+When ready, ask to generate actual k8s/ YAML files for this project.
+
+================================================================================

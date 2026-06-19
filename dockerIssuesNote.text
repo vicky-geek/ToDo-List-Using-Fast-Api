@@ -1,0 +1,370 @@
+================================================================================
+DOCKER ISSUES & FIXES — ToDo FastAPI Project
+================================================================================
+
+This note documents real errors faced while setting up Docker, building,
+pushing to Docker Hub (vickygeek/todo_fast_api), and running containers.
+
+Repo: vickygeek/todo_fast_api
+Docker Hub: https://hub.docker.com/r/vickygeek/todo_fast_api
+
+
+================================================================================
+ISSUE 1: TYPO IN BUILD COMMAND
+================================================================================
+
+Error / command used:
+    sudo docker compose bild app
+    sudo: a password is required   (or command not found)
+
+Cause:
+    Typo — "bild" instead of "build"
+
+Fix:
+    sudo docker compose build app
+
+Tip:
+    Correct spelling: build (not bild)
+
+
+================================================================================
+ISSUE 2: permission denied — docker.sock (MOST COMMON)
+================================================================================
+
+Error:
+    permission denied while trying to connect to the Docker API
+    at unix:///var/run/docker.sock
+
+    OR
+
+    permission denied while trying to connect to the Docker daemon socket
+    at unix:///var/run/docker.sock
+
+Commands that failed WITHOUT sudo:
+    docker images
+    docker tag todo-app:latest vickygeek/todo_fast_api:latest
+    docker push vickygeek/todo_fast_api:latest
+    docker compose up --build
+    docker compose up
+    docker info | grep Username
+
+Commands that worked WITH sudo:
+    sudo docker compose build app
+    sudo docker tag ...
+    sudo docker push ...   (after login — see Issue 4)
+
+Cause:
+    Your Linux user (geek-pc) is not in the "docker" group.
+    Docker daemon socket is owned by root:docker.
+    Only root or docker group members can run docker commands.
+
+Permanent fix (recommended):
+
+    sudo usermod -aG docker $USER
+
+    Then LOG OUT and LOG BACK IN (or reboot).
+    Opening a new terminal alone may NOT be enough.
+
+Verify:
+
+    groups
+    # should include: docker
+
+    docker info | grep Username
+    # should work WITHOUT sudo
+
+Temporary fix (works but annoying):
+
+    sudo docker compose build app
+    sudo docker compose up -d
+    sudo docker push vickygeek/todo_fast_api:latest
+
+    You need sudo for every docker command until Issue 2 permanent fix is done.
+
+
+================================================================================
+ISSUE 3: docker login — pass credential store error
+================================================================================
+
+Error:
+    failed to store tokens: error storing credentials
+    pass not initialized: exit status 1: Error: password store is empty.
+    Try "pass init".
+
+Cause:
+    Docker configured to use "pass" password manager but pass is not set up.
+
+Fix option A — login with username (skip browser):
+
+    docker login -u vickygeek
+
+Fix option B — remove pass from Docker config:
+
+    nano ~/.docker/config.json
+
+    Remove line like:
+        "credsStore": "pass"
+
+    Save, then:
+        docker login -u vickygeek
+
+Fix option C — use access token:
+
+    echo "YOUR_DOCKER_PAT_TOKEN" | docker login -u vickygeek --password-stdin
+
+Warning shown after login:
+    "Your credentials are stored unencrypted in config.json"
+    -> Normal if no credential helper configured. OK for local dev.
+    -> Never commit config.json or share PAT tokens.
+
+
+================================================================================
+ISSUE 4: push access denied — insufficient_scope (NOT LOGGED IN WITH SUDO)
+================================================================================
+
+Error:
+    push access denied, repository does not exist or may require authorization:
+    server message: insufficient_scope: authorization failed
+
+Command:
+    sudo docker push vickygeek/todo_fast_api:latest
+
+Cause:
+    docker login was done as normal user OR not done at all.
+    sudo docker uses ROOT's credentials at:
+        /root/.docker/config.json
+
+    Normal user login is stored at:
+        ~/.docker/config.json
+
+    These are SEPARATE — sudo push does NOT use your user login!
+
+Check if logged in (with sudo):
+
+    sudo docker info | grep Username
+    # empty = not logged in as root
+
+Fix:
+
+    echo "YOUR_DOCKER_PAT_TOKEN" | sudo docker login -u vickygeek --password-stdin
+
+Verify:
+
+    sudo docker info | grep Username
+    # Username: vickygeek
+
+Then push:
+
+    sudo docker push vickygeek/todo_fast_api:latest
+
+Success output looks like:
+    latest: digest: sha256:... size: 856
+
+Other causes of same error:
+    - Repo name wrong on Docker Hub
+    - Repo not created on hub.docker.com
+    - Token expired or revoked
+    - Tag does not start with vickygeek/
+
+    Correct:  vickygeek/todo_fast_api:latest
+    Wrong:    todo_fast_api:latest
+
+
+================================================================================
+ISSUE 5: login succeeded but push still permission denied (docker.sock)
+================================================================================
+
+Situation:
+    docker login succeeded (user login)
+    docker push still fails with docker.sock permission denied
+
+Cause:
+    Two different problems:
+    1. Login OK — credentials saved
+    2. User still not in docker group — cannot connect to Docker daemon
+
+Fix:
+    Use sudo for push (temporary):
+        sudo docker login -u vickygeek --password-stdin   # login as root too
+        sudo docker push vickygeek/todo_fast_api:latest
+
+    OR add user to docker group (permanent — Issue 2 fix):
+        sudo usermod -aG docker $USER
+        logout / login
+        docker push vickygeek/todo_fast_api:latest
+
+
+================================================================================
+ISSUE 6: sudo vs non-sudo — two separate Docker logins
+================================================================================
+
+Important concept:
+
+| Command runs as | Credentials stored in              |
+|-----------------|-------------------------------------|
+| docker login    | ~/.docker/config.json (your user)   |
+| sudo docker login | /root/.docker/config.json (root)  |
+
+If you build with sudo and push with sudo, login with sudo too.
+
+If you fix docker group and run without sudo, login WITHOUT sudo:
+
+    docker login -u vickygeek --password-stdin
+
+Best practice after fixing docker group:
+    Always use docker WITHOUT sudo (no mixing).
+
+
+================================================================================
+ISSUE 7: JWT error inside container — InvalidTokenError
+================================================================================
+
+Error (in container logs):
+    AttributeError: module 'jwt' has no attribute 'InvalidTokenError'
+
+    OR
+
+    AttributeError: module 'jwt' has no attribute 'encode'
+
+Cause:
+    requirements.txt had WRONG package:
+        jwt==1.4.0        <- wrong (remove this)
+        PyJWT==2.13.0     <- correct
+
+    Both install as "import jwt" — wrong package wins.
+
+Fix:
+    1. Remove jwt==1.4.0 from requirements.txt
+    2. Keep only PyJWT
+    3. In utils/auth.py use:
+        from jwt.exceptions import InvalidTokenError
+    4. Rebuild container:
+        docker compose down
+        docker compose up --build -d
+    5. Re-push image if using Docker Hub:
+        docker compose build app
+        docker tag todo-app:latest vickygeek/todo_fast_api:latest
+        docker push vickygeek/todo_fast_api:latest
+
+Rule:
+    pip install PyJWT   <- correct
+    pip install jwt     <- NEVER use this
+
+
+================================================================================
+ISSUE 8: docker compose up — cannot get image
+================================================================================
+
+Error:
+    unable to get image 'mysql:8.0': permission denied ...
+    unable to get image 'todo-app': permission denied ...
+
+Cause:
+    Same as Issue 2 — docker.sock permission
+
+Fix:
+    sudo usermod -aG docker $USER && logout/login
+    OR
+    sudo docker compose up -d --build
+
+
+================================================================================
+SUCCESSFUL WORKFLOW (WHAT FINALLY WORKED)
+================================================================================
+
+Step 1: Build (used sudo because docker group not fixed yet)
+
+    cd ~/Desktop/vicky/Python/ToDo
+    sudo docker compose build app
+
+Step 2: Tag image
+
+    sudo docker tag todo-app:latest vickygeek/todo_fast_api:latest
+
+Step 3: Login as root (for sudo push)
+
+    echo "YOUR_PAT_TOKEN" | sudo docker login -u vickygeek --password-stdin
+
+Step 4: Verify login
+
+    sudo docker info | grep Username
+    # Username: vickygeek
+
+Step 5: Push
+
+    sudo docker push vickygeek/todo_fast_api:latest
+
+Step 6: Success
+
+    latest: digest: sha256:c49d4cd20e82... size: 856
+
+Verify on web:
+    https://hub.docker.com/r/vickygeek/todo_fast_api/tags
+
+
+================================================================================
+RECOMMENDED CLEAN SETUP (AFTER FIXING docker GROUP)
+================================================================================
+
+One-time:
+
+    sudo usermod -aG docker $USER
+    # logout and login
+
+Daily workflow (NO sudo):
+
+    cd ~/Desktop/vicky/Python/ToDo
+    cp .env.example .env          # first time only
+
+    docker login -u vickygeek --password-stdin
+    docker compose build app
+    docker tag todo-app:latest vickygeek/todo_fast_api:latest
+    docker push vickygeek/todo_fast_api:latest
+    docker compose up -d --build
+
+Check:
+
+    docker compose ps
+    curl http://127.0.0.1:8000/docs
+
+
+================================================================================
+SECURITY REMINDERS
+================================================================================
+
+1. NEVER paste Docker PAT tokens in chat, Git, or screenshots
+2. If token was exposed — revoke on hub.docker.com immediately
+3. Create new token: Account Settings -> Personal Access Tokens
+4. .env and ~/.docker/config.json must NOT be committed to Git
+5. Use .env.example for sharing variable names only (no real secrets)
+
+
+================================================================================
+QUICK ERROR LOOKUP TABLE
+================================================================================
+
+| Error keyword                          | Likely issue           | Fix                          |
+|----------------------------------------|------------------------|------------------------------|
+| permission denied docker.sock          | Not in docker group    | usermod -aG docker + relogin |
+| pass not initialized                   | Credential helper      | Remove credsStore or pass init |
+| insufficient_scope / push access denied| Not logged in (sudo)   | sudo docker login            |
+| jwt has no attribute encode            | Wrong jwt package      | Remove jwt, use PyJWT only   |
+| InvalidTokenError missing              | Wrong jwt package      | Same as above                |
+| bild app                               | Typo                   | use build                    |
+| repository does not exist              | Repo not on Docker Hub | Create repo on hub.docker.com|
+
+
+================================================================================
+USEFUL DEBUG COMMANDS
+================================================================================
+
+    docker images
+    docker compose ps
+    docker compose logs -f app
+    docker info | grep Username
+    groups
+    ls -l /var/run/docker.sock
+    cat ~/.docker/config.json          # user credentials (do not share)
+    sudo cat /root/.docker/config.json # root credentials (do not share)
+
+================================================================================
