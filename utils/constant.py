@@ -5,7 +5,7 @@ ROLE_PERMISSIONS = {
 
     },
     2: {
-        "/todos": ["GET"],
+        "/todos": ["GET", "POST"],
         "/todo": ["GET"],
     }
 }
