@@ -9,6 +9,7 @@ This file covers:
 - How requests are routed
 - What changed in docker-compose.yml and why
 - What changed in docker-compose.hub.yml and why
+- Do you need a custom Nginx image on Docker Hub?
 - Why Docker networks (app-network) were added and how they work
 - How to run and test the full stack
 
@@ -256,37 +257,17 @@ Architecture after change:
 7. WHAT CHANGED IN docker-compose.hub.yml
 ================================================================================
 
-docker-compose.hub.yml is for pulling a PRE-BUILT backend image from Docker
-Hub instead of building locally. Used when sharing/deploying without source code.
+docker-compose.hub.yml is for pulling PRE-BUILT images from Docker Hub instead
+of building locally. Used when sharing/deploying on VPS without source build.
 
-OLD setup:
-
-    services:
-      mysql: ...
-      app:
-        image: vickygeek/todo_fast_api:latest
-        container_name: todo_app
-        ports:
-          - "8000:8000"
-        volumes:
-          - ./database/schema.sql:...
-
-NEW setup:
+CURRENT setup (full stack — matches docker-compose.yml):
 
     services:
-      mysql:
-        ...
-        volumes:
-          - ./backend/database/schema.sql:...    # path updated
-        networks:
-          - app-network                           # NEW
-
-      backend:                                     # RENAMED from "app"
-        image: vickygeek/todo_fast_api:latest
-        container_name: todo_backend
-        # NO ports exposed                        # internal only
-        networks:
-          - app-network
+      mysql:        image: mysql:8.0
+      backend:      image: vickygeek/todo_fast_api:latest
+      backend2:     image: vickygeek/todo_fast_api:latest   # load balancing
+      frontend:     image: vickygeek/todo_frontend:latest   # push after build
+      nginx:        image: nginx:latest + volume nginx.conf  # see section 16
 
     networks:
       app-network:
@@ -295,21 +276,40 @@ NEW setup:
 Change-by-change and WHY:
 --------------------------------------------------------------------------------
 
-| Change                              | Why                                                |
-|-------------------------------------|----------------------------------------------------|
-| `app` renamed to `backend`          | Consistent naming with docker-compose.yml            |
-| schema.sql path updated             | File moved to backend/database/schema.sql            |
-| Removed `ports: 8000:8000`          | Hub compose is backend-only; no direct host access   |
-| Added `app-network`                 | Ready for multi-service setup on same network        |
-| NO frontend or nginx services       | Hub file is for API-only deployment from Docker Hub  |
+| Service | docker-compose.yml | docker-compose.hub.yml |
+|---------|-------------------|------------------------|
+| mysql | mysql:8.0 | mysql:8.0 (official — no push needed) |
+| backend | build: ./backend | image: vickygeek/todo_fast_api:latest |
+| backend2 | build: ./backend | image: vickygeek/todo_fast_api:latest (same image) |
+| frontend | build: ./frontend | image: vickygeek/todo_frontend:latest |
+| nginx | nginx:latest + volume | nginx:latest + volume (no custom push required) |
+
+| Change | Why |
+|--------|-----|
+| backend uses `image:` not `build:` | Pull ready image from Docker Hub |
+| backend2 added | Load balancing — same image, two containers |
+| frontend added | Full-stack deploy with React UI from Hub |
+| nginx uses official image + volume | No custom nginx image needed (see section 16) |
+| LOG_DIR + log volumes | Same persistent logging as docker-compose.yml |
+| app-network | All services communicate by service name |
 
 When to use which file:
 
-    docker-compose.yml       ->  Full stack (build everything locally)
-    docker-compose.hub.yml   ->  Backend + MySQL only (pull image from Hub)
+    docker-compose.yml       ->  Build everything locally (development)
+    docker-compose.hub.yml   ->  Pull images from Docker Hub (VPS / teammates)
 
 To run hub version:
+
+    docker compose -f docker-compose.hub.yml pull
     docker compose -f docker-compose.hub.yml up -d
+    # App: http://localhost:8080
+
+Files still needed on VPS (even with hub pull):
+
+    - docker-compose.hub.yml
+    - nginx/nginx.conf          (mounted into official nginx container)
+    - backend/database/schema.sql
+    - .env
 
 
 ================================================================================
@@ -1411,5 +1411,165 @@ PRODUCTION UPGRADES FOR THIS CONFIG (FUTURE)
 5. Add proxy_read_timeout for slow API responses
 6. Pin nginx image version: nginx:1.27-alpine instead of nginx:latest
 
+
+================================================================================
+16. DO YOU NEED A CUSTOM NGINX IMAGE ON DOCKER HUB?
+================================================================================
+
+Short answer: NO — you do NOT need a custom Nginx image like frontend/backend.
+Using official nginx:latest + mounted nginx.conf is correct and common.
+
+
+--------------------------------------------------------------------------------
+16.1 THREE TYPES OF "IMAGES" IN THIS PROJECT
+--------------------------------------------------------------------------------
+
+    | Service | Custom image needed? | Image used |
+    |---------|---------------------|------------|
+    | Backend | YES — your FastAPI code | vickygeek/todo_fast_api:latest |
+    | Frontend | YES — React build + nginx inside | vickygeek/todo_frontend:latest |
+    | Nginx (reverse proxy) | NO — official image is enough | nginx:latest + volume |
+    | MySQL | NO — official image | mysql:8.0 |
+
+Why backend and frontend need custom images:
+    - They contain YOUR application code (Python API, React UI)
+    - Must be built from Dockerfile and pushed to Docker Hub
+
+Why Nginx reverse proxy does NOT need custom image (current approach):
+    - Standard Nginx software — no custom app code
+    - Only difference is nginx/nginx.conf (configuration file)
+    - Config is mounted from host — no rebuild needed when config changes
+
+
+--------------------------------------------------------------------------------
+16.2 CURRENT APPROACH — OFFICIAL NGINX + VOLUME (RECOMMENDED)
+--------------------------------------------------------------------------------
+
+docker-compose.yml and docker-compose.hub.yml:
+
+    nginx:
+      image: nginx:latest
+      volumes:
+        - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      ports:
+        - "8080:80"
+
+How it works:
+    1. Docker pulls official nginx:latest from Docker Hub (maintained by Nginx)
+    2. Your nginx/nginx.conf from project folder replaces default config
+    3. Nginx starts with YOUR load balancing + rate limiting rules
+
+Advantages:
+    + No extra build or push step for you
+    + Edit nginx.conf -> docker compose restart nginx (instant)
+    + Official image always updated and secure
+  3. + Works with docker-compose.hub.yml — only need nginx.conf on VPS
+
+Disadvantage:
+    - VPS must have nginx/nginx.conf file (git clone or copy from repo)
+
+
+--------------------------------------------------------------------------------
+16.3 OPTIONAL — CUSTOM NGINX IMAGE ON DOCKER HUB
+--------------------------------------------------------------------------------
+
+Only needed if you want VPS to run ONLY pulled images with ZERO config files.
+
+    nginx/Dockerfile:
+        FROM nginx:alpine
+        COPY nginx.conf /etc/nginx/nginx.conf
+
+    docker build -t vickygeek/todo_nginx:latest -f nginx/Dockerfile .
+    docker push vickygeek/todo_nginx:latest
+
+    docker-compose.hub.yml:
+        nginx:
+          image: vickygeek/todo_nginx:latest
+          # no volumes block — config baked into image
+
+Advantages:
+    + Self-contained image
+    + VPS needs only images + compose + .env (no nginx.conf on disk)
+
+Disadvantages:
+    - Must rebuild and push image after EVERY nginx.conf change
+    - Rate limit tuning, new backend server, etc. all need new image push
+    - Extra maintenance for little benefit on small projects
+
+
+--------------------------------------------------------------------------------
+16.4 TWO NGINX INSTANCES — DO NOT CONFUSE THEM
+--------------------------------------------------------------------------------
+
+This project has TWO different Nginx roles:
+
+    A) Nginx INSIDE frontend image (todo_frontend container)
+       - Built into vickygeek/todo_frontend:latest
+       - Serves React static files (index.html, JS, CSS)
+       - Config: frontend/nginx.conf (baked into frontend Dockerfile)
+       - MUST be custom frontend image — contains your React app
+
+    B) Nginx reverse proxy (todo_nginx container)
+       - Routes / -> frontend, /api/ -> backend
+       - Config: nginx/nginx.conf
+       - Uses official nginx:latest + volume mount
+       - Does NOT need custom image
+
+    Browser -> todo_nginx (reverse proxy) -> todo_frontend (nginx serves React)
+                                          -> todo_backend / todo_backend2
+
+
+--------------------------------------------------------------------------------
+16.5 WHAT TO PUSH TO DOCKER HUB (SUMMARY)
+--------------------------------------------------------------------------------
+
+    MUST push (custom app images):
+        docker build -t vickygeek/todo_fast_api:latest ./backend
+        docker push vickygeek/todo_fast_api:latest
+
+        docker build -t vickygeek/todo_frontend:latest ./frontend
+        docker push vickygeek/todo_frontend:latest
+
+    DO NOT need to push:
+        mysql:8.0          — official image, Docker pulls automatically
+        nginx:latest       — official image, Docker pulls automatically
+
+    OPTIONAL push:
+        vickygeek/todo_nginx:latest — only if you bake nginx.conf into image
+
+    backend2 uses SAME image as backend:
+        image: vickygeek/todo_fast_api:latest
+        No second push needed — run two containers from one image
+
+
+--------------------------------------------------------------------------------
+16.6 WHAT FILES VPS NEEDS WITH docker-compose.hub.yml
+--------------------------------------------------------------------------------
+
+    Required on VPS (git clone or copy):
+        docker-compose.hub.yml
+        nginx/nginx.conf              <- still needed with official nginx image
+        backend/database/schema.sql
+        .env
+
+    Pulled from Docker Hub automatically:
+        vickygeek/todo_fast_api:latest
+        vickygeek/todo_frontend:latest
+        nginx:latest
+        mysql:8.0
+
+    NOT required on VPS:
+        backend/ Python source (inside todo_fast_api image)
+        frontend/ React source (inside todo_frontend image)
+        backend/Dockerfile, frontend/Dockerfile (only for building)
+
+
+--------------------------------------------------------------------------------
+16.7 ONE-LINE ANSWER
+--------------------------------------------------------------------------------
+
+    Custom Nginx image on Docker Hub is OPTIONAL, not required.
+    Use official nginx:latest + mount nginx/nginx.conf — same as now.
+    Only frontend and backend need custom images pushed to Docker Hub.
 
 ================================================================================
