@@ -192,3 +192,34 @@ The **full-stack** branch. Adds a **React frontend** and **Nginx** reverse proxy
 - Simple to scale or replace individual components later
 
 Use this branch for a complete, production-style setup on one server.
+
+### 4. `laodBalance-and-rateLimiting`
+
+Created from **`nginx-reverse-proxy-with-frontnd`**. Extends the full-stack setup with **Nginx load balancing** and **rate limiting**.
+
+| Feature | Description |
+|---------|-------------|
+| **Load balancing** | 2 backend instances (`backend` + `backend2`) — Nginx distributes API traffic using `least_conn` |
+| **Rate limiting** | Limits requests per IP — `10 req/sec` for API, `5 req/min` for login/register |
+| **Brute-force protection** | `/api/login` and `/api/register` get stricter limits |
+| **Separate logs** | `logs/backend/` and `logs/backend2/` for each backend instance |
+
+**What changed from `nginx-reverse-proxy-with-frontnd`:**
+
+- `docker-compose.yml` — added `backend2` service
+- `nginx/nginx.conf` — `upstream backend` with 2 servers + `limit_req_zone`
+- `loadBalancingAndRatelimiting.text` — detailed notes on all config changes
+
+**Documentation:**
+
+- [loadBalancingAndRatelimiting.text](loadBalancingAndRatelimiting.text) — load balancing and rate limiting explained
+- [nginxNote.text](nginxNote.text) — Nginx reverse proxy notes
+- [logsNote.text](logsNote.text) — backend logging for VPS debugging
+
+Use this branch to learn or deploy with load balancing and API rate limiting on a VPS.
+
+```bash
+git checkout laodBalance-and-rateLimiting
+docker compose up --build -d
+# App: http://localhost:8080
+```

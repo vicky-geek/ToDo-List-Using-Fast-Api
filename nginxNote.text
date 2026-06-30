@@ -745,6 +745,201 @@ For a real VPS deployment, consider:
 
 
 ================================================================================
+15. LOAD BALANCING AND RATE LIMITING (IMPLEMENTED)
+================================================================================
+
+This project now uses Nginx for:
+    1. Load balancing — 2 backend instances (backend + backend2)
+    2. Rate limiting — limits requests per IP to prevent abuse
+
+
+--------------------------------------------------------------------------------
+15.1 LOAD BALANCING
+--------------------------------------------------------------------------------
+
+What is load balancing?
+    Distributes incoming API requests across multiple backend servers so no
+    single server handles all traffic.
+
+Architecture:
+
+    Browser -> Nginx -> backend  (todo_backend  :8000)
+                    -> backend2 (todo_backend2 :8000)
+                              |
+                           MySQL (shared database)
+
+nginx/nginx.conf:
+
+    upstream backend {
+        least_conn;
+        server backend:8000;
+        server backend2:8000;
+    }
+
+| Setting | Meaning |
+|---------|---------|
+| upstream backend | Named group of backend servers |
+| least_conn | Send request to server with FEWEST active connections |
+| backend:8000 | First FastAPI container |
+| backend2:8000 | Second FastAPI container (same code, same DB) |
+
+Load balancing methods (Nginx):
+
+    | Method | How it works |
+    |--------|--------------|
+    | round-robin (default) | Requests rotate: 1st->backend, 2nd->backend2, ... |
+    | least_conn | Request goes to server with fewest open connections |
+    | ip_hash | Same client IP always hits same server (sticky sessions) |
+
+We use least_conn — good for API workloads with varying response times.
+
+docker-compose.yml changes:
+
+    backend   -> todo_backend  (logs/backend/)
+    backend2  -> todo_backend2 (logs/backend2/)   # NEW second instance
+
+Both backends:
+    - Same build (./backend)
+    - Same MySQL database
+    - Separate log folders (avoid write conflicts)
+
+How to verify load balancing:
+
+    # Send many requests and check which backend handled them
+    for i in $(seq 1 10); do curl -s http://localhost:8080/api/todos -H "Authorization: Bearer TOKEN"; done
+
+    # Check logs on each backend
+    tail -f logs/backend/backend.log
+    tail -f logs/backend2/backend.log
+
+    You should see requests split between both instances.
+
+
+--------------------------------------------------------------------------------
+15.2 RATE LIMITING
+--------------------------------------------------------------------------------
+
+What is rate limiting?
+    Blocks or delays clients that send too many requests in a short time.
+    Protects API from abuse, brute-force login, and DDoS-style traffic.
+
+nginx/nginx.conf:
+
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;
+    limit_req_status 429;
+
+Line-by-line:
+
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+    | Part | Meaning |
+    |------|---------|
+    | $binary_remote_addr | Track by client IP address |
+    | zone=api_limit:10m | Named zone, 10MB memory for IP tracking |
+    | rate=10r/s | Max 10 requests per second per IP |
+
+    limit_req_zone ... zone=login_limit:10m rate=5r/m;
+        -> Login/register: max 5 requests per MINUTE per IP (stricter)
+
+    limit_req_status 429;
+        -> Return HTTP 429 Too Many Requests when limit exceeded
+
+Applied in locations:
+
+    A) Login and register (strict):
+        location = /api/login {
+            limit_req zone=login_limit burst=3 nodelay;
+            ...
+        }
+
+    B) All other API routes:
+        location /api/ {
+            limit_req zone=api_limit burst=20 nodelay;
+            ...
+        }
+
+burst and nodelay explained:
+
+    rate=10r/s with burst=20:
+        - Steady limit: 10 requests/second
+        - burst=20: allow short spikes up to 20 extra queued requests
+        - nodelay: process burst immediately (don't artificially delay)
+
+    If client exceeds limit -> 429 Too Many Requests
+
+Example limits in this project:
+
+    | Endpoint | Limit | burst |
+    |----------|-------|-------|
+    | POST /api/login | 5/min per IP | 3 |
+    | POST /api/register | 5/min per IP | 3 |
+    | GET/POST/PUT/DELETE /api/* | 10/sec per IP | 20 |
+
+Test rate limiting:
+
+    # Rapid login attempts (should get 429 after limit)
+    for i in $(seq 1 20); do
+      curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/api/login \
+        -H "Content-Type: application/json" \
+        -d '{"email":"test@test.com","password":"wrong"}'
+    done
+
+    Expected: first few return 401, then 429 when rate limit hits
+
+
+--------------------------------------------------------------------------------
+15.3 WHY location = /api/login IS SEPARATE
+--------------------------------------------------------------------------------
+
+Nginx location priority:
+    location = /api/login     -> exact match (highest priority for this path)
+    location /api/            -> prefix match (all other API routes)
+
+Login gets stricter rate limit (5/min) without limiting normal API usage (10/sec).
+
+proxy_pass for exact locations:
+
+    location = /api/login {
+        proxy_pass http://backend/login;   # strips /api, forwards /login
+    }
+
+
+--------------------------------------------------------------------------------
+15.4 APPLY CHANGES
+--------------------------------------------------------------------------------
+
+    docker compose up --build -d
+    docker compose restart nginx
+
+    # Verify nginx config inside container
+    docker exec todo_nginx nginx -t
+
+    # Check all backends running
+    docker compose ps
+
+
+--------------------------------------------------------------------------------
+15.5 TUNING LIMITS FOR PRODUCTION
+--------------------------------------------------------------------------------
+
+Adjust in nginx/nginx.conf based on your traffic:
+
+    # More generous API limit
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=50r/s;
+
+    # Stricter login protection
+    limit_req_zone $binary_remote_addr zone=login_limit:10m rate=3r/m;
+
+After changes:
+    docker compose restart nginx
+
+To add more backend instances:
+    1. Add backend3 service in docker-compose.yml
+    2. Add server backend3:8000; to upstream backend block
+    3. docker compose up -d
+
+
+================================================================================
 13. QUICK REFERENCE
 ================================================================================
 

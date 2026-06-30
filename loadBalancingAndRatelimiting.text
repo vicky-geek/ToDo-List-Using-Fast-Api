@@ -1,0 +1,883 @@
+================================================================================
+LOAD BALANCING AND RATE LIMITING - DETAILED NOTES
+================================================================================
+
+This file explains ALL changes made to nginx/nginx.conf and docker-compose.yml
+for load balancing and rate limiting in the ToDo project.
+
+Also covers:
+- Advantages of two backend servers (detailed)
+- How two backends use more memory and CPU
+- When 1 backend vs 2 backends is the right choice
+
+
+================================================================================
+1. OVERVIEW — WHAT CHANGED AND WHY
+================================================================================
+
+Before:
+    - 1 backend container
+    - Nginx proxied all /api/ traffic to single backend
+    - No request limits — anyone could spam login/API
+
+After:
+    - 2 backend containers (backend + backend2)
+    - Nginx distributes API traffic between both (load balancing)
+    - Nginx blocks clients that send too many requests (rate limiting)
+
+Files changed:
+    | File | What changed |
+    |------|--------------|
+    | nginx/nginx.conf | Load balancing upstream + rate limit zones |
+    | docker-compose.yml | Added backend2 service |
+    | .gitignore | Added logs/backend2/ |
+
+
+================================================================================
+2. FULL nginx.conf (CURRENT VERSION)
+================================================================================
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+        limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;
+        limit_req_status 429;
+
+        upstream frontend {
+            server frontend:80;
+        }
+
+        upstream backend {
+            least_conn;
+            server backend:8000;
+            server backend2:8000;
+        }
+
+        server {
+            listen 80;
+            server_name _;
+
+            location / { ... }
+
+            location = /api/login { ... }
+            location = /api/register { ... }
+            location /api/ { ... }
+        }
+    }
+
+
+================================================================================
+3. LOAD BALANCING — DETAILED EXPLANATION
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 WHAT IS LOAD BALANCING?
+--------------------------------------------------------------------------------
+
+Load balancing = distributing incoming requests across multiple servers so
+one server does not handle everything alone.
+
+    WITHOUT load balancing:
+        100 requests -> backend (1 server) -> overloaded
+
+    WITH load balancing:
+        100 requests -> Nginx -> backend  (~50 requests)
+                            -> backend2 (~50 requests)
+
+Both backends run the SAME FastAPI app and connect to the SAME MySQL database.
+
+
+--------------------------------------------------------------------------------
+3.2 docker-compose.yml — backend2 SERVICE (NEW)
+--------------------------------------------------------------------------------
+
+Added second backend container:
+
+    backend:                    # existing
+      container_name: todo_backend
+      volumes:
+        - ./logs/backend:/app/logs
+
+    backend2:                   # NEW
+      container_name: todo_backend2
+      volumes:
+        - ./logs/backend2:/app/logs
+
+Why separate log folders?
+    Both backends write logs. Separate folders avoid file conflicts:
+        logs/backend/backend.log   <- todo_backend
+        logs/backend2/backend.log  <- todo_backend2
+
+Both services:
+    - Same build: ./backend
+    - Same env: .env
+    - Same DB: DB_HOST=mysql
+    - Same network: app-network
+
+nginx depends_on updated:
+    depends_on:
+      - frontend
+      - backend
+      - backend2          # NEW — wait for both backends before starting
+
+
+--------------------------------------------------------------------------------
+3.3 upstream backend BLOCK — LOAD BALANCING CONFIG
+--------------------------------------------------------------------------------
+
+OLD config:
+
+    upstream backend {
+        server backend:8000;
+    }
+
+NEW config:
+
+    upstream backend {
+        least_conn;
+        server backend:8000;
+        server backend2:8000;
+    }
+
+Line-by-line:
+
+    upstream backend {
+        Defines a named group of backend servers.
+        Used by: proxy_pass http://backend/;
+
+    least_conn;
+        Load balancing METHOD.
+        Nginx sends each new request to the server with the FEWEST active
+        connections (not necessarily round-robin).
+
+        | Method | Behavior |
+        |--------|----------|
+        | (default) round-robin | Request 1->backend, 2->backend2, 3->backend... |
+        | least_conn | Request goes to server with fewest open connections |
+        | ip_hash | Same client IP always hits same server (sticky session) |
+
+        We chose least_conn because API response times vary (DB queries).
+        Server with fewer active jobs gets the next request.
+
+    server backend:8000;
+        First backend container (todo_backend) on port 8000.
+
+    server backend2:8000;
+        Second backend container (todo_backend2) on port 8000.
+
+How Nginx picks a server:
+    1. Request hits location /api/
+    2. proxy_pass http://backend/;  -> uses upstream "backend"
+    3. Nginx checks least_conn — which server has fewer active connections?
+    4. Forwards request to backend OR backend2
+    5. FastAPI processes request, returns response
+
+
+--------------------------------------------------------------------------------
+3.4 LOAD BALANCING FLOW DIAGRAM
+--------------------------------------------------------------------------------
+
+    Browser: GET /api/todos
+        |
+        v
+    todo_nginx (port 8080 on host)
+        |
+        |  location /api/ matched
+        |  rate limit checked (see section 4)
+        |
+        v
+    upstream backend (least_conn)
+        |
+        +----> todo_backend  :8000  (if fewer connections)
+        |
+        +----> todo_backend2 :8000  (if fewer connections)
+        |
+        v
+    MySQL (both read/write same todo_db)
+
+
+--------------------------------------------------------------------------------
+3.5 ADVANTAGES OF TWO BACKEND SERVERS (DETAILED)
+--------------------------------------------------------------------------------
+
+Why run 2 backends instead of 1? Here are the real advantages:
+
+
+ADVANTAGE 1: Handle more concurrent requests
+----------------------------------------------
+
+Concurrent = many users hitting API at the SAME time.
+
+    Single backend:
+        User1, User2, User3 ... User50  -->  ALL wait on 1 uvicorn process
+        One server processes requests one-by-one (or limited workers)
+        Result: slow responses, timeouts under heavy load
+
+    Two backends (load balanced):
+        User1-25  -->  backend  (todo_backend)
+        User26-50 -->  backend2 (todo_backend2)
+        Work is SPLIT — each server handles half the traffic
+        Result: faster responses when many users are active
+
+Important: This helps when traffic is HIGH and CONCURRENT.
+            It does NOT make a single request faster by itself.
+
+
+ADVANTAGE 2: High availability (fault tolerance)
+------------------------------------------------
+
+    Single backend crashes:
+        API completely DOWN — frontend cannot fetch todos, login fails
+
+    One of two backends crashes:
+        Nginx detects failed server (or stops sending traffic)
+        Other backend keeps serving requests
+        App stays PARTIALLY or FULLY online
+
+Example:
+    todo_backend crashes (bug, OOM, restart)
+    todo_backend2 still running
+    Users can still use the app (Nginx routes to backend2 only)
+
+
+ADVANTAGE 3: Zero-downtime deployments (production)
+---------------------------------------------------
+
+    Single backend:
+        docker compose up --build backend -d
+        -> backend stops -> API unavailable for 10-30 seconds during restart
+
+    Two backends:
+        1. Update and restart backend  (backend2 still serving traffic)
+        2. Update and restart backend2 (backend now serving traffic)
+        -> Users never see full outage
+
+This is how production apps avoid downtime during updates.
+
+
+ADVANTAGE 4: Shared database — same data everywhere
+----------------------------------------------------
+
+Both backends connect to the SAME MySQL:
+
+    backend  --> mysql:3306 --> todo_db
+    backend2 --> mysql:3306 --> todo_db
+
+    User creates todo on backend  -> saved in MySQL
+    User fetches todos on backend2 -> reads SAME todo from MySQL
+
+No data duplication. You scale COMPUTE (processing power), not storage.
+
+
+ADVANTAGE 5: Better resource use under spike traffic
+----------------------------------------------------
+
+    Normal traffic:  1 backend at 20% CPU  — second backend mostly idle
+    Spike traffic:   both backends at 60% CPU — traffic shared
+
+During spikes, second backend absorbs overflow instead of first one hitting 100%.
+
+
+--------------------------------------------------------------------------------
+3.6 HOW TWO BACKENDS USE MORE MEMORY AND CPU
+--------------------------------------------------------------------------------
+
+Your doubt is CORRECT: two backends use MORE resources than one.
+This section explains exactly how and why.
+
+
+WHAT RUNS INSIDE EACH BACKEND CONTAINER?
+-----------------------------------------
+
+Each backend container runs the FULL stack:
+
+    - Python 3.12 runtime
+    - FastAPI application code
+    - uvicorn web server
+    - mysql-connector connection pool (DB_POOL_SIZE=5)
+    - bcrypt, PyJWT, all dependencies from requirements.txt
+    - Logger writing to backend.log
+
+backend and backend2 are IDENTICAL copies — same image, same code.
+So EVERYTHING runs TWICE (once per container).
+
+
+MEMORY USAGE — ROUGH ESTIMATES
+------------------------------
+
+    | Component (per backend) | Approximate RAM |
+    |-------------------------|-----------------|
+    | Python runtime + libs   | 50-80 MB        |
+    | FastAPI app loaded      | 30-50 MB        |
+    | uvicorn workers         | 20-40 MB        |
+    | MySQL connection pool   | 10-20 MB        |
+    | Request processing      | varies          |
+    |-------------------------|-----------------|
+    | TOTAL per backend       | ~150-250 MB     |
+
+    | Setup | Total backend RAM |
+    |-------|-------------------|
+    | 1 backend  | ~150-250 MB |
+    | 2 backends | ~300-500 MB |  (roughly 2x)
+
+On a 1GB VPS with mysql + frontend + nginx + 2 backends:
+    mysql     ~400 MB
+    backend   ~200 MB
+    backend2  ~200 MB
+    frontend  ~50 MB
+    nginx     ~20 MB
+    -----------------
+    Total     ~870 MB  (tight on 1GB VPS!)
+
+This is why 1 backend may be better on small VPS.
+
+
+CPU USAGE — HOW IT WORKS
+------------------------
+
+CPU is used when processing requests:
+    - Parsing JSON request body
+    - JWT token verification
+    - bcrypt password check (CPU heavy!)
+    - MySQL queries
+    - JSON response serialization
+
+    Idle backend (no requests):     ~0-1% CPU
+    Active backend (10 req/sec):    ~10-30% CPU
+    Overloaded (100+ req/sec):      ~80-100% CPU
+
+Two backends and CPU:
+
+    Scenario A — LOW traffic (1 user testing):
+        backend:  2% CPU  (handles all requests)
+        backend2: 0% CPU  (idle, but still uses RAM!)
+        -> backend2 wastes memory, saves no CPU
+
+    Scenario B — HIGH traffic (50 concurrent users):
+        backend:  70% CPU
+        backend2: 65% CPU
+        -> Total capacity ~2x, no single server at 100%
+
+    Scenario C — SPIKE (100 users for 1 minute):
+        Without backend2: backend hits 100% CPU -> slow/timeouts
+        With backend2:    each ~50% CPU -> both handle load
+
+
+WHY MORE RESOURCES DOES NOT ALWAYS MEAN "BETTER"
+-------------------------------------------------
+
+    2 backends = you PAY 2x memory (and CPU capacity) UPFRONT
+                 to handle 2x CONCURRENT load and survive 1 failure
+
+    Analogy — Two cashiers at a shop:
+        - Shop pays 2 salaries (more cost)
+        - When empty: 2nd cashier sits idle (wasted cost)
+        - When busy:  2 lines move faster (worth the cost)
+        - When 1 sick: other still works (reliability)
+
+    You do NOT add a 2nd cashier when shop has 1 customer per hour.
+
+
+RESOURCE COMPARISON TABLE
+-------------------------
+
+    | | 1 Backend | 2 Backends |
+    |---|-----------|------------|
+    | RAM used | ~200 MB | ~400 MB |
+    | CPU at idle | ~1% | ~1% each (2 processes) |
+    | Max concurrent capacity | Limited by 1 server | ~2x (shared load) |
+    | Survives 1 crash | NO | YES |
+    | Complexity | Simple | More containers, logs, config |
+    | Cost on VPS | Lower | Higher |
+    | Best for | Low traffic, learning | Production, high traffic |
+
+
+WHEN TO USE 1 BACKEND vs 2 BACKENDS
+-----------------------------------
+
+    USE 1 BACKEND when:
+        - Learning / personal ToDo project
+        - Few users (< 20 concurrent)
+        - VPS has 1GB RAM or less
+        - Traffic is low most of the time
+        - Simplicity matters more than scale
+
+    USE 2 BACKENDS when:
+        - Production app with real users
+        - API gets slow under load (1 server at 80%+ CPU)
+        - Need uptime if one container fails
+        - VPS has 2GB+ RAM available
+        - Expect traffic spikes (many users at once)
+
+
+HOW TO CHECK MEMORY AND CPU ON YOUR VPS
+---------------------------------------
+
+    # See memory/CPU per container
+    docker stats
+
+    Example output:
+    NAME            CPU %   MEM USAGE / LIMIT
+    todo_backend    0.5%    180MiB / 1GiB
+    todo_backend2   0.2%    175MiB / 1GiB
+    todo_mysql      1.2%    420MiB / 1GiB
+    todo_nginx      0.0%    15MiB  / 1GiB
+    todo_frontend   0.0%    45MiB  / 1GiB
+
+    # Watch live while sending requests
+    docker stats todo_backend todo_backend2
+
+
+FOR THIS PROJECT (LEARNING)
+---------------------------
+
+    We use 2 backends to LEARN:
+        - Nginx load balancing (upstream, least_conn)
+        - How traffic splits between servers
+        - Separate log files per backend
+
+    For a real small VPS deploy with low traffic:
+        1 backend is simpler and uses less RAM — totally fine.
+
+    To remove backend2 and go back to 1 backend:
+        1. Remove backend2 from docker-compose.yml
+        2. Remove server backend2:8000; from nginx upstream
+        3. docker compose up -d
+
+
+--------------------------------------------------------------------------------
+3.7 ADVANTAGES vs TRADE-OFFS — SUMMARY
+--------------------------------------------------------------------------------
+
+    ADVANTAGES (why 2 backends):
+        + Handle more concurrent requests
+        + Survive one backend crash
+        + Zero-downtime deploys in production
+        + Share load during traffic spikes
+        + Same MySQL — no data sync issues
+
+    TRADE-OFFS (cost of 2 backends):
+        - ~2x RAM usage (~400MB vs ~200MB for backends)
+        - ~2x Python/uvicorn processes using CPU headroom
+        - Second backend idle when traffic is low (wasted RAM)
+        - More complex: 2 containers, 2 log folders, nginx upstream
+        - NOT faster for a single request — only better under parallel load
+
+    ONE LINE:
+        Two backends trade MORE resources for MORE capacity and reliability.
+        Not automatically better — only worth it when one server is not enough.
+
+
+--------------------------------------------------------------------------------
+3.8 HOW TO VERIFY LOAD BALANCING WORKS
+--------------------------------------------------------------------------------
+
+    # Terminal 1 — watch backend 1 logs
+    tail -f logs/backend/backend.log
+
+    # Terminal 2 — watch backend 2 logs
+    tail -f logs/backend2/backend.log
+
+    # Send multiple API requests (need valid JWT token)
+    for i in $(seq 1 20); do
+      curl -s http://localhost:8080/api/todos \
+        -H "Authorization: Bearer YOUR_TOKEN"
+    done
+
+    You should see requests logged in BOTH backend.log files.
+
+
+================================================================================
+4. RATE LIMITING — DETAILED EXPLANATION
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 WHAT IS RATE LIMITING?
+--------------------------------------------------------------------------------
+
+Rate limiting = restricting how many requests one client (IP) can send in a
+time period. Protects against:
+    - Brute-force password guessing on /login
+    - API spam / abuse
+    - Accidental infinite loops in frontend code
+    - Basic DDoS-style flooding
+
+When limit exceeded -> Nginx returns HTTP 429 Too Many Requests
+(FastAPI never receives the request)
+
+
+--------------------------------------------------------------------------------
+4.2 events { worker_connections 1024; }
+--------------------------------------------------------------------------------
+
+OLD:
+    events {}
+
+NEW:
+    events {
+        worker_connections 1024;
+    }
+
+What it does:
+    Each Nginx worker process can handle up to 1024 simultaneous connections.
+    Default is often 512 or 1024 depending on image.
+
+Why added:
+    With load balancing + rate limiting + more traffic, slightly higher
+    connection capacity per worker. Good practice for production configs.
+
+
+--------------------------------------------------------------------------------
+4.3 limit_req_zone — DEFINE RATE LIMIT ZONES
+--------------------------------------------------------------------------------
+
+Added in http { } block (MUST be here, not inside location):
+
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;
+
+Line-by-line for first line:
+
+    limit_req_zone
+        Nginx directive to CREATE a shared memory zone for rate tracking.
+
+    $binary_remote_addr
+        KEY used to identify the client.
+        = client IP address in compact binary form (4 bytes for IPv4).
+        Each unique IP gets its own counter.
+
+    zone=api_limit:10m
+        | Part | Meaning |
+        |------|---------|
+        | api_limit | Zone name (referenced in location blocks) |
+        | 10m | 10 megabytes of shared memory for storing IP counters |
+
+        10MB can track roughly 160,000 unique IP addresses.
+
+    rate=10r/s
+        Rate limit: 10 requests per second per IP.
+        "r/s" = requests per second.
+
+Second line:
+
+    limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;
+
+    zone=login_limit  -> separate zone for auth endpoints
+    rate=5r/m         -> 5 requests per MINUTE per IP (much stricter)
+
+Why two zones?
+    Login/register are attack targets (brute force). Stricter limit.
+    Normal API (/todos) needs higher limit for regular app usage.
+
+
+--------------------------------------------------------------------------------
+4.4 limit_req_status 429
+--------------------------------------------------------------------------------
+
+    limit_req_status 429;
+
+What it does:
+    When client exceeds rate limit, Nginx returns HTTP status 429.
+    Default without this line is 503 Service Unavailable.
+
+Why 429:
+    429 = "Too Many Requests" — standard HTTP code for rate limiting.
+    Browsers and API clients understand this means "slow down, try later".
+
+
+--------------------------------------------------------------------------------
+4.5 APPLYING RATE LIMITS IN location BLOCKS
+--------------------------------------------------------------------------------
+
+Three location blocks for API (order and type matter):
+
+    A) location = /api/login      (exact match)
+    B) location = /api/register (exact match)
+    C) location /api/           (prefix match — everything else under /api)
+
+
+--------------------------------------------------------------------------------
+4.6 location = /api/login  (STRICT AUTH LIMIT)
+--------------------------------------------------------------------------------
+
+    location = /api/login {
+        limit_req zone=login_limit burst=3 nodelay;
+
+        proxy_pass http://backend/login;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+location = /api/login
+    EXACT match only. Matches POST /api/login exactly.
+    Does NOT match /api/login/extra or /api/logins
+
+limit_req zone=login_limit burst=3 nodelay;
+    | Part | Meaning |
+    |------|---------|
+    | zone=login_limit | Use the login zone (5 requests/minute) |
+    | burst=3 | Allow short burst of 3 extra requests in queue |
+    | nodelay | Process burst immediately (don't delay requests) |
+
+How 5r/m + burst=3 works in practice:
+    - Steady rate: ~1 request every 12 seconds per IP
+    - Can burst 3 extra quickly, then must wait
+    - After 5+ rapid login attempts -> 429 Too Many Requests
+
+proxy_pass http://backend/login;
+    | Part | Meaning |
+    |------|---------|
+    | http://backend | upstream block (load balanced) |
+    | /login | path sent to backend (strips /api prefix) |
+
+    Browser:  POST /api/login
+    Backend:  POST /login  (on backend OR backend2 via load balancer)
+
+
+--------------------------------------------------------------------------------
+4.7 location = /api/register  (SAME STRICT LIMIT)
+--------------------------------------------------------------------------------
+
+    location = /api/register {
+        limit_req zone=login_limit burst=3 nodelay;
+        proxy_pass http://backend/register;
+        ...
+    }
+
+Same strict limit as login — prevents spam account creation.
+
+
+--------------------------------------------------------------------------------
+4.8 location /api/  (GENERAL API LIMIT)
+--------------------------------------------------------------------------------
+
+    location /api/ {
+        limit_req zone=api_limit burst=20 nodelay;
+
+        proxy_pass http://backend/;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+location /api/
+    PREFIX match. Catches all /api/ paths NOT handled by exact locations above.
+    Examples: /api/todos, /api/todos/5, /api/refresh-token, /api/logout
+
+limit_req zone=api_limit burst=20 nodelay;
+    | Part | Meaning |
+    |------|---------|
+    | zone=api_limit | 10 requests per second per IP |
+    | burst=20 | Allow burst up to 20 extra requests |
+    | nodelay | No artificial delay on burst |
+
+    Normal app usage (clicking todos, loading list) stays under limit.
+    Automated spam (1000 req/sec) gets blocked with 429.
+
+proxy_pass http://backend/;
+    Trailing slash strips /api prefix (same as before).
+    /api/todos -> backend receives /todos
+    Load balanced across backend + backend2.
+
+
+--------------------------------------------------------------------------------
+4.9 NGINX LOCATION PRIORITY (WHY ORDER MATTERS)
+--------------------------------------------------------------------------------
+
+Nginx picks ONE location per request:
+
+    Priority (highest first):
+    1. Exact match:     location = /api/login
+    2. Longest prefix:  location /api/
+    3. General prefix:  location /
+
+    Request: POST /api/login
+        -> matches location = /api/login (exact) -> login_limit (5/min)
+
+    Request: GET /api/todos
+        -> no exact match
+        -> matches location /api/ -> api_limit (10/sec)
+
+    Request: GET /
+        -> matches location / -> frontend (no rate limit on UI)
+
+
+--------------------------------------------------------------------------------
+4.10 RATE LIMIT SUMMARY TABLE
+--------------------------------------------------------------------------------
+
+    | Endpoint | location | Zone | Rate | burst | Over limit |
+    |----------|----------|------|------|-------|------------|
+    | POST /api/login | = /api/login | login_limit | 5/min | 3 | 429 |
+    | POST /api/register | = /api/register | login_limit | 5/min | 3 | 429 |
+    | GET /api/todos | /api/ | api_limit | 10/sec | 20 | 429 |
+    | POST /api/todos | /api/ | api_limit | 10/sec | 20 | 429 |
+    | POST /api/refresh-token | /api/ | api_limit | 10/sec | 20 | 429 |
+    | GET / (React UI) | / | none | unlimited | - | - |
+
+
+================================================================================
+5. COMPLETE REQUEST FLOW EXAMPLES
+================================================================================
+
+--------------------------------------------------------------------------------
+Example A: User opens homepage
+--------------------------------------------------------------------------------
+
+    GET http://localhost:8080/
+        -> location / matched
+        -> NO rate limit
+        -> proxy_pass http://frontend
+        -> React app loads
+
+
+--------------------------------------------------------------------------------
+Example B: User logs in
+--------------------------------------------------------------------------------
+
+    POST http://localhost:8080/api/login
+        -> location = /api/login matched (exact)
+        -> limit_req login_limit checked (5/min per IP)
+        -> if OK: proxy_pass http://backend/login
+        -> upstream least_conn picks backend OR backend2
+        -> FastAPI authController.login() runs
+        -> if over limit: 429 returned immediately (backend never called)
+
+
+--------------------------------------------------------------------------------
+Example C: User fetches todos
+--------------------------------------------------------------------------------
+
+    GET http://localhost:8080/api/todos
+        -> location /api/ matched
+        -> limit_req api_limit checked (10/sec per IP)
+        -> proxy_pass http://backend/ -> GET /todos
+        -> load balanced to backend or backend2
+        -> middleware logs: GET /todos -> 200 (12ms)
+
+
+--------------------------------------------------------------------------------
+Example D: Attacker spams login
+--------------------------------------------------------------------------------
+
+    20 rapid POST /api/login from same IP
+        -> requests 1-5: may pass (burst allows some)
+        -> requests 6+: 429 Too Many Requests
+        -> backend protected from brute-force load
+
+
+================================================================================
+6. WHAT DID NOT CHANGE
+================================================================================
+
+    - frontend upstream (still 1 frontend server)
+    - proxy_set_header lines (same as before)
+    - /api/ prefix stripping (trailing slash on proxy_pass)
+    - React UI routing (location / unchanged except no rate limit)
+    - MySQL (single shared database for both backends)
+
+
+================================================================================
+7. HOW TO APPLY AND TEST
+================================================================================
+
+Apply changes:
+
+    docker compose up --build -d
+    docker compose restart nginx
+
+Verify nginx config:
+
+    docker exec todo_nginx nginx -t
+    # Expected: syntax is ok / test is successful
+
+Check all services running:
+
+    docker compose ps
+    # Should show: backend, backend2, frontend, nginx, mysql all Up
+
+Test rate limiting:
+
+    for i in $(seq 1 20); do
+      curl -s -o /dev/null -w "Request $i: %{http_code}\n" \
+        -X POST http://localhost:8080/api/login \
+        -H "Content-Type: application/json" \
+        -d '{"email":"test@test.com","password":"wrong"}'
+    done
+
+    Expected: 401 (wrong password) then 429 (rate limited)
+
+Test load balancing:
+
+    tail -f logs/backend/backend.log &
+    tail -f logs/backend2/backend.log
+    # Send multiple authenticated /api/todos requests
+    # Both log files should receive entries
+
+
+================================================================================
+8. TUNING FOR PRODUCTION
+================================================================================
+
+Adjust limits in nginx/nginx.conf:
+
+    # More generous for busy API
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=50r/s;
+
+    # Stricter login protection
+    limit_req_zone $binary_remote_addr zone=login_limit:10m rate=3r/m;
+
+Add more backends:
+
+    1. Add backend3 in docker-compose.yml
+    2. Add server backend3:8000; in upstream backend
+    3. docker compose up -d
+
+Remove load balancing (back to 1 backend):
+
+    1. Remove backend2 from docker-compose.yml
+    2. Remove server backend2:8000; from upstream
+    3. Remove least_conn; (optional)
+    4. docker compose up -d
+
+Switch to round-robin load balancing:
+
+    upstream backend {
+        # remove least_conn; line — round-robin is default
+        server backend:8000;
+        server backend2:8000;
+    }
+
+
+================================================================================
+9. QUICK REFERENCE
+================================================================================
+
+Load balancing:
+    upstream backend { least_conn; server backend:8000; server backend2:8000; }
+    -> Nginx splits API traffic between 2 FastAPI containers
+
+Rate limiting:
+    limit_req_zone ... zone=api_limit ... rate=10r/s    -> general API
+    limit_req_zone ... zone=login_limit ... rate=5r/m   -> login/register
+    limit_req zone=... burst=... nodelay;               -> applied per location
+    limit_req_status 429;                               -> response when blocked
+
+Related files:
+    nginx/nginx.conf          -> all config above
+    docker-compose.yml        -> backend + backend2 services
+    logs/backend/backend.log  -> backend 1 request logs
+    logs/backend2/backend.log -> backend 2 request logs
+
+================================================================================
