@@ -3,6 +3,7 @@ from fastapi import Response, status
 from mysql.connector import Error, IntegrityError
 
 from database.database import close_db, get_connection
+from utils.logger import logger
 
 
 class item(BaseModel):
@@ -45,7 +46,7 @@ async def addToDo(ToDo: ToDo, response: Response):
             ( ToDo.item.task, ToDo.item.priority, ToDo.item.description),
         )
         conn.commit()
-        print("cursor.lastrowid :", cursor.rowcount)
+        logger.info("cursor.lastrowid : %s", cursor.rowcount)
         response.status_code = status.HTTP_201_CREATED
         return {"id": cursor.lastrowid, "item": ToDo.item}
     except IntegrityError:

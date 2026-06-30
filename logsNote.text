@@ -1,0 +1,451 @@
+================================================================================
+BACKEND LOGS - VPS DEBUGGING GUIDE
+================================================================================
+
+This file covers:
+- All logging changes made to the project and WHY
+- Where logs are stored
+- logger vs print — when to use which
+- Python logging library (no pip install needed)
+- How request middleware logging works
+- VPS debugging commands
+
+
+================================================================================
+0. ALL CHANGES MADE FOR LOGGING (WITH REASONS)
+================================================================================
+
+Problem we solved:
+    When app runs on VPS with docker compose, print() output disappears when
+    container restarts. No timestamps, no history, hard to debug yesterday's
+    login failures or API errors.
+
+
+--------------------------------------------------------------------------------
+CHANGE 1: Created backend/utils/logger.py  (NEW FILE)
+--------------------------------------------------------------------------------
+
+What was added:
+    - Python logging setup using built-in `logging` library (no pip install)
+    - setup_logger()       -> creates logger with file + console handlers
+    - configure_uvicorn_logging() -> sends uvicorn logs to same file
+
+Key settings:
+    LOG_DIR = os.getenv("LOG_DIR", "logs")
+    LOG_FILE = logs/backend.log
+    TimedRotatingFileHandler -> new file each midnight, keep 30 days
+    Format: 2026-06-29 14:30:05 | INFO | todo_app | message
+
+Why:
+    | Reason | Explanation |
+    |--------|-------------|
+    | Centralized logging | One place to configure format, file path, rotation |
+    | Timestamps | Every line has date+time for VPS debugging |
+    | File persistence | Logs saved to disk, survive container restart |
+    | Daily rotation | backend.log, backend.log.2026-06-28, etc. |
+    | No extra dependency | logging is built into Python standard library |
+    | Reusable | Any controller can import setup_logger() |
+
+Why NOT print():
+    print() has no timestamp, no file save, no log levels, not production standard
+
+
+--------------------------------------------------------------------------------
+CHANGE 2: Updated backend/main.py  (MODIFIED)
+--------------------------------------------------------------------------------
+
+What was added:
+
+    from utils.logger import configure_uvicorn_logging, setup_logger
+    configure_uvicorn_logging()
+    logger = setup_logger()
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.info("%s %s -> %s (%.0fms)", ...)
+        return response
+
+Why configure_uvicorn_logging():
+    Uvicorn (the server) also produces logs. This sends those logs to the SAME
+    backend.log file so everything is in one place on VPS.
+
+Why HTTP middleware:
+    | Reason | Explanation |
+    |--------|-------------|
+    | Automatic | Logs EVERY API request without adding code to each controller |
+    | Consistent format | All routes logged the same way |
+    | Request tracking | method, path, status code, response time |
+    | VPS debugging | See POST /login -> 401 from yesterday's log file |
+
+How middleware works:
+    1. Request arrives (e.g. POST /login)
+    2. Middleware starts timer
+    3. call_next(request) -> runs actual route (authController.login)
+    4. Middleware logs result: POST /login -> 200 (45ms)
+    5. Returns response to client
+
+Example log output:
+    2026-06-29 14:30:05 | INFO | todo_app | POST /login -> 200 (45ms)
+    2026-06-29 14:30:10 | INFO | todo_app | GET /todos -> 200 (12ms)
+    2026-06-29 14:30:15 | INFO | todo_app | POST /login -> 401 (8ms)
+
+
+--------------------------------------------------------------------------------
+CHANGE 3: Updated docker-compose.yml  (backend service)
+--------------------------------------------------------------------------------
+
+What was added to backend service:
+
+    environment:
+      LOG_DIR: /app/logs
+
+    volumes:
+      - ./logs/backend:/app/logs
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+Why LOG_DIR: /app/logs:
+    Tells logger.py where to write files INSIDE the container.
+
+Why volume ./logs/backend:/app /logs:
+    | Reason | Explanation |
+    |--------|-------------|
+    | Persistence | Logs stored on VPS host, not inside container |
+    | Survives restart | docker compose restart backend keeps logs |
+    | Survives rebuild | docker compose up --build keeps logs |
+    | Easy access | SSH to VPS and read logs/backend/backend.log directly |
+
+Without volume:
+    Logs live inside container -> lost when container is removed/rebuilt
+
+Why Docker logging options (max-size, max-file):
+    | Reason | Explanation |
+    |--------|-------------|
+    | Disk protection | Prevents Docker logs from filling VPS disk |
+    | Backup logs | docker compose logs still works as second option |
+    | Rotation | Keeps max 5 files x 10MB = ~50MB Docker log limit |
+
+Mapping:
+    Host (VPS):     ./logs/backend/backend.log
+    Container:      /app/logs/backend.log
+
+
+--------------------------------------------------------------------------------
+CHANGE 4: Updated docker-compose.hub.yml  (backend service)
+--------------------------------------------------------------------------------
+
+Same logging changes as docker-compose.yml:
+
+    environment:
+      LOG_DIR: /app/logs
+    volumes:
+      - ./logs/backend:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+Why same changes in hub file:
+    docker-compose.hub.yml pulls pre-built image from Docker Hub instead of
+    building locally. Logging must work the same way on VPS whether you build
+    or pull the image.
+
+
+--------------------------------------------------------------------------------
+CHANGE 5: Updated .gitignore  (MODIFIED)
+--------------------------------------------------------------------------------
+
+What was added:
+
+    logs/
+
+Why:
+    | Reason | Explanation |
+    |--------|-------------|
+    | Logs are runtime data | Not source code — should not go to Git |
+    | VPS-specific | Each server has its own logs |
+    | Security | Logs may contain emails, IPs, error details |
+    | Repo size | Log files can grow large over 30 days |
+
+Note: logs/ folder is auto-created on first run. No need to commit it.
+
+
+--------------------------------------------------------------------------------
+CHANGE 6: Created logsNote.text  (THIS FILE)
+--------------------------------------------------------------------------------
+
+Why:
+    Documentation for VPS debugging — commands to view live logs, old logs,
+    search errors, download logs from VPS to local machine.
+
+
+--------------------------------------------------------------------------------
+SUMMARY TABLE — ALL FILES CHANGED
+--------------------------------------------------------------------------------
+
+| File | Action | Purpose |
+|------|--------|---------|
+| backend/utils/logger.py | CREATED | Logging config, file rotation, timestamps |
+| backend/main.py | MODIFIED | Middleware logs every API request |
+| docker-compose.yml | MODIFIED | Volume mount + LOG_DIR + Docker log rotation |
+| docker-compose.hub.yml | MODIFIED | Same logging setup for Hub image deploy |
+| .gitignore | MODIFIED | Exclude logs/ from Git |
+| logsNote.text | CREATED | VPS debugging guide and commands |
+
+Files NOT changed (no pip install needed):
+    requirements.txt — logging is Python built-in, not a separate package
+
+
+--------------------------------------------------------------------------------
+LOGGER vs PRINT — PROJECT RULE
+--------------------------------------------------------------------------------
+
+| Use case | Use |
+|----------|-----|
+| Quick local test while coding | print() is OK |
+| API events, errors, auth, DB on VPS | logger.info() / logger.error() |
+| Request tracking | Already handled by middleware in main.py |
+| Production / Docker deployment | Always logger |
+
+Import in any controller when needed:
+
+    from utils.logger import setup_logger
+    logger = setup_logger()
+    logger.info("Login attempt: %s", email)
+    logger.error("DB error: %s", e)
+
+
+--------------------------------------------------------------------------------
+PYTHON logging LIBRARY — DO I NEED TO INSTALL?
+--------------------------------------------------------------------------------
+
+NO. logging is part of Python standard library (like os, json, time).
+
+    import logging   # works immediately, no pip install
+
+Already available in:
+    - Local development
+    - backend/Dockerfile (python:3.12-slim image)
+    - VPS docker compose deployment
+
+
+================================================================================
+1. WHERE LOGS ARE STORED
+================================================================================
+
+A) Persistent log file (recommended for debugging)
+--------------------------------------------------
+    Host path:     ./logs/backend/backend.log
+    Inside container: /app/logs/backend.log
+
+    - Survives container restart and rebuild
+    - Includes timestamp on every line
+    - Rotates daily at midnight (keeps last 30 days)
+    - Old files named: backend.log.2026-06-29, backend.log.2026-06-28, etc.
+
+B) Docker container logs (backup)
+---------------------------------
+    Stored by Docker on the VPS (json-file driver)
+    - Max 5 files x 10MB each (auto-rotation)
+    - Lost if you run: docker compose down -v  (without -v keeps them)
+
+Log line format:
+
+    2026-06-29 14:30:05 | INFO     | todo_app | POST /login -> 200 (45ms)
+    2026-06-29 14:30:10 | INFO     | uvicorn.access | 172.18.0.5:42100 - "GET /todos HTTP/1.0" 200
+
+
+================================================================================
+2. VIEW LIVE LOGS (while app is running)
+================================================================================
+
+# Follow backend log file on VPS (best for debugging)
+tail -f logs/backend/backend.log
+
+# Follow Docker container stdout logs
+docker compose logs -f backend
+
+# Last 100 lines from file
+tail -n 100 logs/backend/backend.log
+
+# Last 100 lines from Docker
+docker compose logs --tail=100 backend
+
+
+================================================================================
+3. VIEW PREVIOUS / OLD LOGS
+================================================================================
+
+# List all rotated log files
+ls -lh logs/backend/
+
+    Example output:
+    backend.log              <- today's log
+    backend.log.2026-06-28   <- yesterday
+    backend.log.2026-06-27   <- day before
+
+# Read a specific previous day
+cat logs/backend/backend.log.2026-06-28
+
+# Search all logs for errors
+grep -i error logs/backend/backend.log*
+
+# Search for a specific API path
+grep "/login" logs/backend/backend.log*
+
+# Search for failed requests (4xx, 5xx)
+grep "-> 4" logs/backend/backend.log*
+grep "-> 5" logs/backend/backend.log*
+
+# Search Docker logs from a time range (if file logs deleted)
+docker compose logs --since 2h backend
+docker compose logs --since 2026-06-29T10:00:00 backend
+docker compose logs --until 2026-06-29T12:00:00 backend
+
+
+================================================================================
+4. COMMON VPS DEBUGGING SCENARIOS
+================================================================================
+
+Scenario: User says login failed yesterday
+    grep "/login" logs/backend/backend.log.2026-06-28
+    grep "-> 401" logs/backend/backend.log.2026-06-28
+
+Scenario: API suddenly slow
+    grep "ms)" logs/backend/backend.log | tail -50
+    # Look for high millisecond values like (3500ms)
+
+Scenario: Backend crashed
+    docker compose logs --tail=200 backend
+    tail -n 200 logs/backend/backend.log
+    grep -i "error\|exception\|traceback" logs/backend/backend.log*
+
+Scenario: Database connection issues
+    grep -i "database\|mysql\|connection" logs/backend/backend.log*
+
+Scenario: Check who called which endpoint today
+    grep "todo_app" logs/backend/backend.log
+
+
+================================================================================
+5. LOG FILES ON VPS AFTER DEPLOY
+================================================================================
+
+After docker compose up on VPS, logs folder is created automatically:
+
+    your-project/
+    ├── logs/
+    │   └── backend/
+    │       ├── backend.log           # today
+    │       ├── backend.log.2026-06-28
+    │       └── backend.log.2026-06-27
+    ├── docker-compose.yml
+    └── ...
+
+Important:
+    - logs/ is in .gitignore (not pushed to Git — stays on VPS only)
+    - Back up logs/ before redeploying if you need old history
+    - Disk usage: ~30 days kept by default (change in backend/utils/logger.py)
+
+
+================================================================================
+6. DOWNLOAD LOGS FROM VPS TO LOCAL MACHINE
+================================================================================
+
+# Using scp
+scp user@your-vps-ip:/path/to/ToDo/logs/backend/backend.log ./
+
+# Download all rotated logs
+scp -r user@your-vps-ip:/path/to/ToDo/logs/backend ./local-logs/
+
+# Using rsync
+rsync -avz user@your-vps-ip:/path/to/ToDo/logs/backend/ ./local-logs/
+
+
+================================================================================
+7. CONFIGURATION REFERENCE
+================================================================================
+
+File: backend/utils/logger.py
+    LOG_DIR env var     -> log folder path (default: logs)
+    backupCount=30      -> keep 30 days of rotated files
+    when="midnight"     -> new file each day at midnight
+
+File: docker-compose.yml (backend service)
+    volumes:
+      - ./logs/backend:/app/logs     # persist logs on host
+    environment:
+      LOG_DIR: /app/logs
+    logging:
+      options:
+        max-size: "10m"              # Docker log rotation
+        max-file: "5"                # keep 5 Docker log files
+
+File: backend/main.py
+    Middleware logs every request:
+        METHOD PATH -> STATUS_CODE (duration_ms)
+
+
+================================================================================
+8. HOW REQUEST MIDDLEWARE LOGGING WORKS (main.py)
+================================================================================
+
+Code in backend/main.py:
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.info("%s %s -> %s (%.0fms)", method, path, status, duration_ms)
+        return response
+
+Flow for POST /login:
+
+    Browser -> Nginx -> Backend
+        |
+        v
+    [middleware starts timer]
+        |
+        v
+    call_next(request) -> authController.login() runs
+        |
+        v
+    [middleware logs: POST /login -> 200 (45ms)]
+        |
+        v
+    Response returned
+
+What gets logged:
+    - request.method      -> GET, POST, PUT, DELETE
+    - request.url.path    -> /login, /todos, /todos/3
+    - response.status_code -> 200, 401, 404, 500
+    - duration_ms         -> how long the route took
+
+What is NOT logged (for security):
+    - Passwords
+    - Request body content
+    - JWT tokens
+
+
+================================================================================
+9. QUICK COMMAND CHEAT SHEET
+================================================================================
+
+    tail -f logs/backend/backend.log              # live file logs
+    docker compose logs -f backend                # live docker logs
+    ls -lh logs/backend/                          # list all log files
+    grep "-> 500" logs/backend/backend.log*       # find server errors
+    grep "/api" logs/backend/backend.log*           # find API calls (if logged)
+    docker compose restart backend                # restart after code change
+    docker compose up --build backend -d            # rebuild + restart backend
+
+================================================================================

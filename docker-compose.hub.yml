@@ -28,6 +28,14 @@ services:
       - .env
     environment:
       DB_HOST: mysql
+      LOG_DIR: /app/logs
+    volumes:
+      - ./logs/backend:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     depends_on:
       mysql:
         condition: service_healthy
