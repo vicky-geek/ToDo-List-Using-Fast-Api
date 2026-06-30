@@ -1,0 +1,179 @@
+================================================================================
+CI/CD PIPELINE NOTES - GitHub Actions + Docker Hub + VPS Deploy
+================================================================================
+
+This project uses GitHub Actions to build Docker images, push to Docker Hub,
+and deploy to VPS automatically on git push.
+
+
+================================================================================
+1. FILES CREATED
+================================================================================
+
+    .github/workflows/deploy.yml     -> GitHub Actions workflow
+    docker-compose.dockerhub.yml     -> Compose file used ON VPS for deploy
+
+
+================================================================================
+2. PIPELINE FLOW
+================================================================================
+
+    git push (main or laodBalance-and-rateLimiting)
+        |
+        v
+    GitHub Actions (ubuntu-latest)
+        |
+        +-- checkout code
+        +-- docker login (Docker Hub secrets)
+        +-- docker build + push vickygeek/todo_fast_api:latest  (./backend)
+        +-- docker build + push vickygeek/todo_frontend:latest (./frontend)
+        |
+        v
+    SSH to VPS (/home/ubuntu/todo)
+        |
+        +-- git pull (latest compose + nginx.conf)
+        +-- docker compose -f docker-compose.dockerhub.yml pull
+        +-- docker compose -f docker-compose.dockerhub.yml up -d
+
+
+================================================================================
+3. GITHUB SECRETS (REQUIRED)
+================================================================================
+
+Add in GitHub repo: Settings -> Secrets and variables -> Actions -> New secret
+
+    | Secret name       | Value |
+    |-------------------|-------|
+    | DOCKER_USERNAME   | vickygeek (your Docker Hub username) |
+    | DOCKER_PASSWORD   | Docker Hub password or access token |
+    | HOST              | VPS IP address (e.g. 123.45.67.89) |
+    | USERNAME          | SSH user on VPS (e.g. ubuntu) |
+    | SSH_PRIVATE_KEY   | Private key content (full PEM file) |
+
+Docker Hub access token (recommended over password):
+    hub.docker.com -> Account Settings -> Security -> New Access Token
+
+
+================================================================================
+4. VPS ONE-TIME SETUP
+================================================================================
+
+On your VPS (before first CI/CD deploy):
+
+    # Install Docker + Docker Compose
+    sudo apt update
+    sudo apt install -y docker.io docker-compose-plugin git
+
+    # Clone project
+    cd /home/ubuntu
+    git clone <your-repo-url> todo
+    cd todo
+    git checkout laodBalance-and-rateLimiting
+
+    # Create .env (NOT in Git — create manually on VPS)
+    cp .env.example .env
+    nano .env
+
+    # Add GitHub Actions SSH public key to authorized_keys
+    # (public key matching SSH_PRIVATE_KEY secret)
+
+    # First manual run (optional)
+    docker compose -f docker-compose.dockerhub.yml pull
+    docker compose -f docker-compose.dockerhub.yml up -d
+
+
+================================================================================
+5. docker-compose.dockerhub.yml vs docker-compose.hub.yml
+================================================================================
+
+    | File | Purpose |
+    |------|---------|
+    | docker-compose.dockerhub.yml | Used by CI/CD on VPS (deploy.yml references this) |
+    | docker-compose.hub.yml | Same layout — manual pull/deploy from your laptop |
+
+Both pull images from Docker Hub. Keep them in sync when you change services.
+
+
+================================================================================
+6. WHAT GETS BUILT AND PUSHED BY CI/CD
+================================================================================
+
+    | Image | Built from | Used by |
+    |-------|------------|---------|
+    | vickygeek/todo_fast_api:latest | ./backend | backend, backend2 |
+    | vickygeek/todo_frontend:latest | ./frontend | frontend |
+
+NOT built by CI/CD (official images pulled on VPS):
+    mysql:8.0
+    nginx:latest  (+ nginx/nginx.conf mounted from git pull)
+
+
+================================================================================
+7. TRIGGER BRANCHES
+================================================================================
+
+Workflow runs on push to:
+    - main
+    - laodBalance-and-rateLimiting
+
+Edit .github/workflows/deploy.yml to change branches:
+
+    on:
+      push:
+        branches:
+          - your-branch-name
+
+
+================================================================================
+8. MANUAL COMMANDS (SAME AS CI/CD)
+================================================================================
+
+    # Build and push locally (without GitHub Actions)
+    docker build -t vickygeek/todo_fast_api:latest ./backend
+    docker push vickygeek/todo_fast_api:latest
+    docker build -t vickygeek/todo_frontend:latest ./frontend
+    docker push vickygeek/todo_frontend:latest
+
+    # On VPS
+    cd /home/ubuntu/todo
+    docker compose -f docker-compose.dockerhub.yml pull
+    docker compose -f docker-compose.dockerhub.yml up -d
+
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+Problem: denied: requested access to the resource is denied
+    Fix: Check DOCKER_USERNAME and DOCKER_PASSWORD secrets
+         Image name must start with your Docker Hub username
+
+Problem: SSH connection failed
+    Fix: Verify HOST, USERNAME, SSH_PRIVATE_KEY secrets
+         Add matching public key to VPS ~/.ssh/authorized_keys
+
+Problem: docker compose file not found on VPS
+    Fix: Ensure git clone path is /home/ubuntu/todo
+         git pull must succeed before compose up
+
+Problem: frontend pull fails
+    Fix: Ensure CI/CD pushed vickygeek/todo_frontend:latest
+         Create repo on Docker Hub if it does not exist
+
+Problem: nginx.conf not found on VPS
+    Fix: git pull on VPS — nginx/nginx.conf is in repo, not in Docker image
+
+Problem: .env missing on VPS
+    Fix: Create .env manually on VPS (never commit to Git)
+
+
+================================================================================
+10. QUICK REFERENCE
+================================================================================
+
+    Push code     ->  GitHub Actions runs automatically
+    App URL       ->  http://YOUR_VPS_IP:8080
+    View logs     ->  docker compose -f docker-compose.dockerhub.yml logs -f
+    Restart       ->  docker compose -f docker-compose.dockerhub.yml restart
+
+================================================================================

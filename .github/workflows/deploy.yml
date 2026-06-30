@@ -1,0 +1,43 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - laodBalance-and-rateLimiting
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push backend image
+        run: |
+          docker build -t vickygeek/todo_fast_api:latest ./backend
+          docker push vickygeek/todo_fast_api:latest
+
+      - name: Build and push frontend image
+        run: |
+          docker build -t vickygeek/todo_frontend:latest ./frontend
+          docker push vickygeek/todo_frontend:latest
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/ubuntu/todo
+            git pull origin laodBalance-and-rateLimiting || git pull origin main
+            docker compose -f docker-compose.dockerhub.yml pull
+            docker compose -f docker-compose.dockerhub.yml up -d
