@@ -20,6 +20,15 @@ def authenticate(request: Request):
     return user
 
 
+def _get_allowed_methods(path: str, allowed_paths: dict) -> list | None:
+    if path in allowed_paths:
+        return allowed_paths[path]
+    for allowed_path, methods in allowed_paths.items():
+        if path.startswith(f"{allowed_path}/"):
+            return methods
+    return None
+
+
 def Authorization(request: Request):
     print("request.state.user :", request.state.user)
     auth_header = request.headers.get("Authorization")
@@ -30,14 +39,14 @@ def Authorization(request: Request):
     role = user.get("role")
     path = request.url.path
     method = request.method
-    allowed_paths = ROLE_PERMISSIONS.get(role, [])
-    allowed_methods = allowed_paths.get(path, [])
+    allowed_paths = ROLE_PERMISSIONS.get(role, {})
+    allowed_methods = _get_allowed_methods(path, allowed_paths) or []
     print("role :", role)
     print("path :", path)
     print("allowed_paths :", allowed_paths)
     print("allowed_methods :", allowed_methods)
     print("method :", method)
-    if path not in allowed_paths:
+    if allowed_methods is None or not allowed_methods:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     if method not in allowed_methods:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
@@ -49,14 +58,14 @@ def AuthorizationWithAuthentication(request: Request,user: dict = Depends(authen
     role = user.get("role")
     path = request.url.path
     method = request.method
-    allowed_paths = ROLE_PERMISSIONS.get(role, [])
-    allowed_methods = allowed_paths.get(path, [])
+    allowed_paths = ROLE_PERMISSIONS.get(role, {})
+    allowed_methods = _get_allowed_methods(path, allowed_paths) or []
     print("role :", role)
     print("path :", path)
     print("allowed_paths :", allowed_paths)
     print("allowed_methods :", allowed_methods)
     print("method :", method)
-    if path not in allowed_paths:
+    if allowed_methods is None or not allowed_methods:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     if method not in allowed_methods:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")

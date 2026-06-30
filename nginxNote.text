@@ -1,0 +1,1220 @@
+================================================================================
+NGINX NOTES - ToDo Full-Stack Project
+================================================================================
+
+This file covers:
+- What Nginx does in this project
+- Two Nginx configs (reverse proxy vs frontend)
+- nginx/nginx.conf explained line by line (detailed)
+- How requests are routed
+- What changed in docker-compose.yml and why
+- What changed in docker-compose.hub.yml and why
+- Why Docker networks (app-network) were added and how they work
+- How to run and test the full stack
+
+
+================================================================================
+1. WHY NGINX IS USED IN THIS PROJECT
+================================================================================
+
+Before (main branch):
+    Browser  -->  FastAPI backend (port 8000)
+    Only API, no frontend UI.
+
+After (nginx-reverse-proxy-with-frontnd branch):
+    Browser  -->  Nginx (port 80)  -->  Frontend (React UI)
+                              |
+                              +-------->  Backend (FastAPI API)
+
+Nginx acts as a REVERSE PROXY — a single public entry point that forwards
+requests to the correct internal service.
+
+Benefits:
+1. One URL for users: http://localhost (or your VPS IP)
+2. Frontend and API share the same origin (no CORS issues)
+3. Backend and frontend are NOT exposed directly to the internet
+4. Easy to deploy everything on one VPS with docker compose up
+5. Each service runs in its own container — if one crashes, others survive
+
+
+================================================================================
+2. PROJECT STRUCTURE (NGINX-RELATED FILES)
+================================================================================
+
+ToDo/
+│
+├── frontend/
+│   ├── Dockerfile          # Builds React app + serves with Nginx
+│   └── nginx.conf          # Nginx INSIDE frontend container (SPA routing)
+│
+├── nginx/
+│   └── nginx.conf          # Main REVERSE PROXY Nginx (public entry point)
+│
+├── docker-compose.yml      # Full stack: mysql + backend + frontend + nginx
+└── docker-compose.hub.yml  # Backend-only from Docker Hub (no frontend/nginx)
+
+
+================================================================================
+3. TWO NGINX CONFIGS — WHY TWO?
+================================================================================
+
+This project uses TWO separate Nginx instances for different jobs:
+
+--------------------------------------------------------------------------------
+A) frontend/nginx.conf  (inside frontend container)
+--------------------------------------------------------------------------------
+
+Purpose: Serve the built React static files (HTML, JS, CSS).
+
+Key setting:
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+Why try_files?
+    React is a Single Page Application (SPA). Routes like /login or /register
+    do not exist as real files on disk. When user refreshes on /login, Nginx
+    must return index.html and let React Router handle the route.
+
+    Without try_files:
+        /login  -->  404 Not Found
+
+    With try_files:
+        /login  -->  index.html  -->  React shows Login page
+
+This Nginx only listens INSIDE the Docker network (not exposed to host).
+
+--------------------------------------------------------------------------------
+B) nginx/nginx.conf  (reverse proxy container)
+--------------------------------------------------------------------------------
+
+Purpose: Public gateway. Routes traffic to frontend or backend.
+
+    upstream frontend {
+        server frontend:80;      # Docker service name + port
+    }
+
+    upstream backend {
+        server backend:8000;     # FastAPI runs on port 8000
+    }
+
+    location / {
+        proxy_pass http://frontend;    # All UI requests -> React
+    }
+
+    location /api/ {
+        proxy_pass http://backend/;    # All API requests -> FastAPI
+    }
+
+"frontend" and "backend" are Docker Compose SERVICE NAMES.
+Docker's internal DNS resolves them to container IPs automatically.
+
+
+================================================================================
+4. REQUEST FLOW (STEP BY STEP)
+================================================================================
+
+Example 1: User opens http://localhost/
+
+    1. Browser sends GET /
+    2. Host machine port 80 -> todo_nginx container
+    3. nginx/nginx.conf matches location /
+    4. proxy_pass http://frontend -> todo_frontend container
+    5. frontend/nginx.conf serves index.html
+    6. React app loads in browser
+
+Example 2: User logs in (POST /api/login)
+
+    1. React calls fetch("/api/login", ...)
+    2. Browser sends POST /api/login to http://localhost
+    3. todo_nginx matches location /api/
+    4. proxy_pass http://backend/  STRIPS the /api prefix
+    5. Backend receives POST /login  (not /api/login)
+    6. FastAPI authController.login() handles it
+    7. Response flows back: backend -> nginx -> browser
+
+Important — proxy_pass trailing slash:
+
+    location /api/ {
+        proxy_pass http://backend/;   # trailing slash matters!
+    }
+
+    /api/login   -->  backend receives /login
+    /api/todos   -->  backend receives /todos
+
+    If you wrote proxy_pass http://backend; (no trailing slash):
+    /api/login   -->  backend receives /api/login  (WRONG — route not found)
+
+
+================================================================================
+5. PROXY HEADERS EXPLAINED
+================================================================================
+
+In nginx/nginx.conf:
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+| Header              | Purpose                                              |
+|---------------------|------------------------------------------------------|
+| Host                | Tells backend the original hostname (localhost)      |
+| X-Real-IP           | Client's real IP address (not Nginx container IP)    |
+| X-Forwarded-For     | Chain of proxy IPs (useful behind load balancers)    |
+| X-Forwarded-Proto   | http or https — backend knows if request was secure  |
+
+Why needed?
+    Without these headers, backend only sees Nginx's internal IP.
+    Useful for logging, rate limiting, and HTTPS redirects in production.
+
+
+================================================================================
+6. WHAT CHANGED IN docker-compose.yml
+================================================================================
+
+OLD setup (backend-only branch):
+
+    services:
+      mysql:
+        ...
+      app:
+        build: .                    # built from root Dockerfile
+        container_name: todo_app
+        ports:
+          - "8000:8000"              # backend exposed directly to host
+
+NEW setup (full-stack with nginx):
+
+    services:
+      mysql:
+        ...
+        volumes:
+          - ./backend/database/schema.sql:...   # path updated (see below)
+        networks:
+          - app-network                         # NEW: shared network
+
+      backend:                                  # RENAMED from "app"
+        build:
+          context: ./backend                     # NEW: build from backend/
+        container_name: todo_backend
+        # NO ports exposed to host               # backend is internal only
+
+      frontend:                                 # NEW SERVICE
+        build:
+          context: ./frontend
+        container_name: todo_frontend
+        depends_on:
+          - backend
+
+      nginx:                                    # NEW SERVICE
+        image: nginx:latest
+        container_name: todo_nginx
+        ports:
+          - "80:80"                             # ONLY public port
+        volumes:
+          - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+        depends_on:
+          - frontend
+          - backend
+
+    networks:
+      app-network:                              # NEW: all services on same network
+
+    volumes:
+      mysql_data:
+
+--------------------------------------------------------------------------------
+Change-by-change and WHY:
+--------------------------------------------------------------------------------
+
+| Change                              | Why                                                |
+|-------------------------------------|----------------------------------------------------|
+| `app` renamed to `backend`          | Clearer name; matches nginx upstream and folder name |
+| `build: .` -> `build: ./backend`    | Backend code moved into backend/ folder              |
+| Removed `ports: 8000:8000` on backend | Backend should not be public; only Nginx exposes 80 |
+| Added `frontend` service            | React UI runs as its own container                 |
+| Added `nginx` service               | Single entry point for browser traffic             |
+| Added `app-network`                 | All containers can talk using service names        |
+| schema.sql path -> `./backend/...`  | schema.sql moved with backend code                 |
+| Nginx uses `image: nginx:latest`    | No custom Dockerfile needed; config mounted as volume |
+| Only Nginx exposes port 80          | Security: one door in, internal services hidden     |
+
+Architecture after change:
+
+    Host :80
+       |
+    [nginx]  ----->  [frontend:80]   (React UI)
+       |
+       +--------->  [backend:8000]  (FastAPI)
+       |
+    [mysql:3306]  <--- backend connects here (internal)
+
+
+================================================================================
+7. WHAT CHANGED IN docker-compose.hub.yml
+================================================================================
+
+docker-compose.hub.yml is for pulling a PRE-BUILT backend image from Docker
+Hub instead of building locally. Used when sharing/deploying without source code.
+
+OLD setup:
+
+    services:
+      mysql: ...
+      app:
+        image: vickygeek/todo_fast_api:latest
+        container_name: todo_app
+        ports:
+          - "8000:8000"
+        volumes:
+          - ./database/schema.sql:...
+
+NEW setup:
+
+    services:
+      mysql:
+        ...
+        volumes:
+          - ./backend/database/schema.sql:...    # path updated
+        networks:
+          - app-network                           # NEW
+
+      backend:                                     # RENAMED from "app"
+        image: vickygeek/todo_fast_api:latest
+        container_name: todo_backend
+        # NO ports exposed                        # internal only
+        networks:
+          - app-network
+
+    networks:
+      app-network:
+
+--------------------------------------------------------------------------------
+Change-by-change and WHY:
+--------------------------------------------------------------------------------
+
+| Change                              | Why                                                |
+|-------------------------------------|----------------------------------------------------|
+| `app` renamed to `backend`          | Consistent naming with docker-compose.yml            |
+| schema.sql path updated             | File moved to backend/database/schema.sql            |
+| Removed `ports: 8000:8000`          | Hub compose is backend-only; no direct host access   |
+| Added `app-network`                 | Ready for multi-service setup on same network        |
+| NO frontend or nginx services       | Hub file is for API-only deployment from Docker Hub  |
+
+When to use which file:
+
+    docker-compose.yml       ->  Full stack (build everything locally)
+    docker-compose.hub.yml   ->  Backend + MySQL only (pull image from Hub)
+
+To run hub version:
+    docker compose -f docker-compose.hub.yml up -d
+
+
+================================================================================
+8. DOCKER NETWORKS — WHY app-network WAS ADDED AND HOW IT WORKS
+================================================================================
+
+In docker-compose.yml (and docker-compose.hub.yml) we added:
+
+    networks:
+      app-network:
+
+And every service is attached to it:
+
+    services:
+      mysql:
+        networks:
+          - app-network
+      backend:
+        networks:
+          - app-network
+      frontend:
+        networks:
+          - app-network
+      nginx:
+        networks:
+          - app-network
+
+
+--------------------------------------------------------------------------------
+8.1 WHAT IS A DOCKER NETWORK?
+--------------------------------------------------------------------------------
+
+A Docker network is a virtual private network that connects containers together.
+
+Think of it like a private LAN (local area network) inside your machine:
+
+    - Each container gets its own IP address on that network
+    - Containers on the SAME network can talk to each other
+    - Containers on DIFFERENT networks cannot talk (isolated)
+
+Without a custom network, Docker Compose still creates a default network.
+We explicitly named ours `app-network` so it is clear and consistent across
+both compose files.
+
+
+--------------------------------------------------------------------------------
+8.2 WHY WE ADDED app-network
+--------------------------------------------------------------------------------
+
+Before (2 services only — mysql + app):
+
+    docker compose created an implicit default network automatically.
+    mysql and app could talk because they were in the same compose project.
+
+After (4 services — mysql + backend + frontend + nginx):
+
+    We now have MORE containers that must communicate:
+
+        nginx     -->  frontend   (proxy UI requests)
+        nginx     -->  backend    (proxy API requests)
+        backend   -->  mysql      (database queries)
+
+    We added `app-network` because:
+
+    1. All services need to be on ONE shared network to find each other
+    2. Service names (mysql, backend, frontend, nginx) work as hostnames
+    3. Internal services stay hidden from the outside world
+    4. Same network name in docker-compose.yml and docker-compose.hub.yml
+       keeps setup consistent when switching between local build and Hub image
+    5. Easy to add more services later (e.g. Redis, monitoring) on same network
+
+
+--------------------------------------------------------------------------------
+8.3 HOW DOCKER DNS WORKS (SERVICE NAMES AS HOSTNAMES)
+--------------------------------------------------------------------------------
+
+Docker has a built-in DNS server inside each network.
+
+When you write a service name in docker-compose.yml, Docker registers it
+as a hostname that points to that container's IP.
+
+    Service name in compose     Hostname containers use
+    -----------------------     -------------------------
+    mysql                  -->  mysql
+    backend                -->  backend
+    frontend               -->  frontend
+    nginx                  -->  nginx
+
+You do NOT use:
+    - localhost       (that means "this container itself", not another container)
+    - 127.0.0.1       (same problem)
+    - container_name  (works sometimes, but service name is the standard)
+
+Example — backend connects to MySQL using .env:
+
+    DB_HOST=mysql        # "mysql" is the service name, NOT localhost
+
+    Inside todo_backend container:
+        get_connection() reads DB_HOST=mysql
+        Python mysql.connector connects to mysql:3306
+        Docker DNS resolves "mysql" -> todo_mysql container IP (e.g. 172.18.0.2)
+
+
+--------------------------------------------------------------------------------
+8.4 VISUAL — HOW CONTAINERS TALK ON app-network
+--------------------------------------------------------------------------------
+
+    +------------------------------------------------------------------+
+    |                     app-network (172.18.0.0/16)                  |
+    |                                                                  |
+    |   +-------------+    +-------------+    +-------------+          |
+    |   | todo_mysql  |    |todo_backend |    |todo_frontend|          |
+    |   |  :3306      |<---|  :8000      |    |  :80        |          |
+    |   +-------------+    +-------------+    +------+------+          |
+    |         ^                  ^                   ^                 |
+    |         |                  |                   |                 |
+    |    DB_HOST=mysql     proxy_pass          proxy_pass             |
+    |                      http://backend      http://frontend        |
+    |                            ^                   ^                 |
+    |                            |                   |                 |
+    |                     +------+-------------------+------+          |
+    |                     |         todo_nginx       :80    |          |
+    |                     +----------------+----------------+          |
+    |                                      |                           |
+    +------------------------------------------------------------------+
+                                           |
+                                    Host port 80:80
+                                           |
+                                      Your Browser
+
+
+--------------------------------------------------------------------------------
+8.5 REAL EXAMPLES — STEP BY STEP
+--------------------------------------------------------------------------------
+
+Example A: Backend connects to MySQL
+-------------------------------------
+
+    1. backend container starts with env: DB_HOST=mysql
+    2. FastAPI calls get_connection() in database/database.py
+    3. mysql.connector tries to connect to host="mysql", port=3306
+    4. Docker DNS on app-network resolves "mysql" -> todo_mysql IP
+    5. Connection succeeds — backend can read/write todos table
+
+    Test from inside backend container:
+
+        docker exec -it todo_backend sh
+        # if ping available:
+        ping mysql
+        # or test DB port:
+        python -c "import socket; s=socket.create_connection(('mysql',3306),5); print('OK')"
+
+    If backend used DB_HOST=localhost instead:
+        It would look for MySQL INSIDE the backend container itself -> FAIL
+        Because MySQL runs in a SEPARATE container (todo_mysql).
+
+
+Example B: Nginx proxies to Frontend
+-------------------------------------
+
+    1. Browser requests http://localhost/
+    2. Request hits todo_nginx (port 80 mapped to host)
+    3. nginx.conf: proxy_pass http://frontend;
+    4. Docker DNS resolves "frontend" -> todo_frontend IP (e.g. 172.18.0.4)
+    5. Request forwarded to todo_frontend:80
+    6. frontend/nginx.conf serves index.html
+    7. React app loads in browser
+
+    Nginx config uses service name, not container name:
+
+        proxy_pass http://frontend;     # CORRECT (service name)
+        proxy_pass http://todo_frontend;  # also works but not recommended
+
+
+Example C: Nginx proxies to Backend
+-------------------------------------
+
+    1. React calls fetch("/api/login", ...)
+    2. Browser sends POST http://localhost/api/login
+    3. todo_nginx matches location /api/
+    4. proxy_pass http://backend/;  strips /api prefix
+    5. Docker DNS resolves "backend" -> todo_backend IP (e.g. 172.18.0.3)
+    6. FastAPI receives POST /login on port 8000
+    7. JSON response returns: backend -> nginx -> browser
+
+
+Example D: Frontend does NOT talk to Backend directly
+-------------------------------------------------------
+
+    The React app never calls http://backend:8000 directly.
+
+    Browser  -->  nginx (/api/...)  -->  backend
+
+    Why?
+        - Browser runs on YOUR machine (host), not inside app-network
+        - Browser cannot resolve Docker service names like "backend"
+        - Only containers on app-network can use those hostnames
+        - That is why Nginx is the bridge between host (browser) and internal network
+
+
+--------------------------------------------------------------------------------
+8.6 WITHOUT app-network vs WITH app-network
+--------------------------------------------------------------------------------
+
+WITHOUT explicit network (old 2-service setup):
+
+    services:
+      mysql: ...
+      app: ...
+
+    Docker Compose auto-creates: todo_default network
+    mysql and app join it automatically — works fine for 2 services.
+
+WITH explicit app-network (current 4-service setup):
+
+    services:
+      mysql:
+        networks: [app-network]
+      backend:
+        networks: [app-network]
+      frontend:
+        networks: [app-network]
+      nginx:
+        networks: [app-network]
+
+    networks:
+      app-network:
+
+    All 4 services share one named network — nginx can reach frontend AND backend,
+    backend can reach mysql, everything is isolated from other Docker projects.
+
+
+--------------------------------------------------------------------------------
+8.7 WHAT IF A SERVICE IS NOT ON app-network?
+--------------------------------------------------------------------------------
+
+If you forget to add networks to a service, Docker puts it on the default
+network. If other services are only on app-network, they CANNOT communicate.
+
+    # BROKEN example:
+    services:
+      backend:
+        networks:
+          - app-network
+      nginx:
+        # missing networks — goes to default network only
+        ports:
+          - "80:80"
+
+    Result: nginx gets 502 Bad Gateway because it cannot resolve "backend"
+    or "frontend" — they are on a different network.
+
+    Fix: Every service that needs to talk to each other must share app-network.
+
+
+--------------------------------------------------------------------------------
+8.8 USEFUL COMMANDS TO INSPECT THE NETWORK
+--------------------------------------------------------------------------------
+
+    # List all Docker networks
+    docker network ls
+
+    # See which containers are on app-network (name may include project prefix)
+    docker network inspect todo_app-network
+    # or:
+    docker network inspect $(docker network ls -q --filter name=app-network)
+
+    # Output shows each container's IP on the network:
+    #
+    #   "Containers": {
+    #       "abc123...": { "Name": "todo_mysql",    "IPv4Address": "172.18.0.2/16" }
+    #       "def456...": { "Name": "todo_backend",  "IPv4Address": "172.18.0.3/16" }
+    #       "ghi789...": { "Name": "todo_frontend", "IPv4Address": "172.18.0.4/16" }
+    #       "jkl012...": { "Name": "todo_nginx",    "IPv4Address": "172.18.0.5/16" }
+    #   }
+
+    # Ping another service from inside a container
+    docker exec -it todo_nginx ping backend
+    docker exec -it todo_backend ping mysql
+
+    # Check DNS resolution inside a container
+    docker exec -it todo_nginx nslookup backend
+    docker exec -it todo_nginx nslookup frontend
+
+
+--------------------------------------------------------------------------------
+8.9 PORTS vs NETWORKS — IMPORTANT DIFFERENCE
+--------------------------------------------------------------------------------
+
+These are two different concepts. Do not confuse them.
+
+| Concept   | What it does                          | Example in this project        |
+|-----------|---------------------------------------|--------------------------------|
+| Network   | Lets containers TALK to each other    | nginx -> backend via app-network |
+| ports     | Exposes container port to HOST machine| "80:80" on nginx only          |
+
+    networks: app-network
+        -> Internal communication between containers
+        -> Uses service names: mysql, backend, frontend, nginx
+
+    ports: "80:80"
+        -> Maps container port to your laptop/VPS
+        -> Only nginx has ports — browser on host can reach the app
+
+    backend has NO ports mapping:
+        -> Your laptop CANNOT open http://localhost:8000
+        -> But nginx CAN reach backend:8000 inside app-network
+        -> This is intentional for security
+
+
+--------------------------------------------------------------------------------
+8.10 SUMMARY — app-network IN ONE LINE
+--------------------------------------------------------------------------------
+
+    app-network is the private road connecting all containers.
+    Service names (mysql, backend, frontend, nginx) are the addresses.
+    Only Nginx has a door to the outside world (port 80).
+
+
+================================================================================
+9. HOW TO RUN THE FULL STACK
+================================================================================
+
+Prerequisites:
+    - Docker and Docker Compose installed
+    - .env file at project root (copy from .env.example)
+
+Commands:
+
+    # Build and start all services (foreground)
+    docker compose up --build
+
+    # Build and start in background
+    docker compose up --build -d
+
+    # Stop all services
+    docker compose down
+
+    # View logs for a specific service
+    docker compose logs -f nginx
+    docker compose logs -f backend
+    docker compose logs -f frontend
+
+    # Rebuild only one service after code change
+    docker compose up --build backend -d
+    docker compose up --build frontend -d
+
+Open in browser:
+    http://localhost          -> React frontend
+    http://localhost/api/...  -> proxied to FastAPI (use from frontend JS)
+
+
+================================================================================
+10. TESTING NGINX ROUTING MANUALLY
+================================================================================
+
+From your host machine (with containers running):
+
+    # Frontend (should return HTML)
+    curl http://localhost/
+
+    # Backend health via proxy (register/login endpoints)
+    curl -X POST http://localhost/api/login \
+      -H "Content-Type: application/json" \
+      -d '{"email":"test@example.com","password":"password123"}'
+
+    # Direct backend access should FAIL (port not exposed)
+    curl http://localhost:8000/todos
+    # Connection refused — expected and correct
+
+
+================================================================================
+11. COMMON ISSUES AND FIXES
+================================================================================
+
+Issue: 502 Bad Gateway on /
+    Cause: frontend container not running or not ready
+    Fix:  docker compose logs frontend
+          docker compose up --build frontend -d
+
+Issue: 502 Bad Gateway on /api/...
+    Cause: backend container crashed or MySQL not ready
+    Fix:  docker compose logs backend
+          docker compose logs mysql
+          Wait for mysql healthcheck to pass
+
+Issue: 404 on /api/login
+    Cause: proxy_pass missing trailing slash
+    Fix:  Use proxy_pass http://backend/; (with trailing slash)
+
+Issue: React route /login gives 404 on refresh
+    Cause: frontend/nginx.conf missing try_files
+    Fix:  Ensure try_files $uri $uri/ /index.html; is in frontend nginx.conf
+
+Issue: CORS errors in browser
+    Cause: Frontend calling backend directly (http://localhost:8000)
+    Fix:  Frontend must call /api/... (relative URL through Nginx proxy)
+
+Issue: nginx config change not applied
+    Cause: Config is mounted read-only; container needs restart
+    Fix:  docker compose restart nginx
+
+Issue: Container cannot connect to mysql / backend / frontend
+    Cause: Service not attached to app-network, or wrong hostname used
+    Fix:  Ensure all services have `networks: [app-network]`
+          Use service name (mysql, backend) not localhost inside containers
+          Run: docker network inspect <network_name>
+
+
+================================================================================
+12. PRODUCTION CONSIDERATIONS (FUTURE)
+================================================================================
+
+For a real VPS deployment, consider:
+
+1. HTTPS (SSL/TLS)
+   - Add Certbot + Let's Encrypt
+   - Nginx listens on 443 with SSL certificate
+   - Redirect HTTP (80) -> HTTPS (443)
+
+2. secure=True on refresh_token cookie (in authController.py)
+   - Currently secure=False for local HTTP development
+   - Set secure=True when using HTTPS in production
+
+3. Remove MySQL port 3307 from host exposure
+   - In production, MySQL should only be reachable inside Docker network
+   - Remove ports: "3307:3306" from docker-compose.yml
+
+4. Use specific image tags instead of nginx:latest
+   - e.g. nginx:1.27-alpine for reproducible builds
+
+5. Add rate limiting in nginx.conf for /api/ routes
+
+
+================================================================================
+13. QUICK REFERENCE
+================================================================================
+
+| File                      | Role                                      |
+|---------------------------|-------------------------------------------|
+| nginx/nginx.conf          | Public reverse proxy (port 80)            |
+| frontend/nginx.conf       | Serves React build + SPA routing          |
+| frontend/Dockerfile       | Builds React, copies dist into Nginx      |
+| backend/Dockerfile        | Runs FastAPI with uvicorn on port 8000    |
+| docker-compose.yml        | Full stack: mysql + backend + frontend + nginx |
+| docker-compose.hub.yml    | Backend + mysql only (Docker Hub image)   |
+
+Request routing summary:
+
+    /           ->  nginx  ->  frontend:80   (React UI)
+    /api/*      ->  nginx  ->  backend:8000  (FastAPI, /api stripped)
+    mysql:3306  ->  internal only, backend connects via DB_HOST=mysql
+
+Network summary:
+
+    app-network  ->  private network linking all containers
+    Service DNS  ->  mysql, backend, frontend, nginx resolve automatically
+    Host access  ->  only nginx exposes port 8080 to the outside (8080:80)
+
+
+================================================================================
+14. nginx/nginx.conf — DETAILED LINE-BY-LINE EXPLANATION
+================================================================================
+
+File location:  nginx/nginx.conf
+Used by:        todo_nginx container (reverse proxy)
+Mounted in:     docker-compose.yml as /etc/nginx/nginx.conf (read-only)
+Host access:    http://localhost:8080  (maps to container port 80)
+
+This file is the MAIN public gateway. Every browser request hits this Nginx
+first, then gets forwarded to frontend (React) or backend (FastAPI).
+
+
+--------------------------------------------------------------------------------
+FULL FILE (for reference)
+--------------------------------------------------------------------------------
+
+    events {}
+
+    http {
+
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        upstream frontend {
+            server frontend:80;
+        }
+
+        upstream backend {
+            server backend:8000;
+        }
+
+        server {
+
+            listen 80;
+
+            server_name _;
+
+            location / {
+
+                proxy_pass http://frontend;
+
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            location /api/ {
+
+                proxy_pass http://backend/;
+
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+        }
+    }
+
+
+--------------------------------------------------------------------------------
+LINE 1: events {}
+--------------------------------------------------------------------------------
+
+    events {}
+
+What it does:
+    Required top-level block in nginx.conf when using the full config file.
+    Controls how Nginx handles connections (worker_connections, etc.).
+
+Why empty {}?
+    We use default values. For this small app, defaults are enough.
+    In production you might add:
+
+        events {
+            worker_connections 1024;
+        }
+
+Note:
+    This file replaces /etc/nginx/nginx.conf entirely (mounted via Docker).
+    So we MUST include both events {} and http {} blocks ourselves.
+
+
+--------------------------------------------------------------------------------
+LINE 3: http { ... }
+--------------------------------------------------------------------------------
+
+    http {
+
+What it does:
+    Main block for all HTTP/HTTPS server configuration.
+    Everything about web traffic lives inside http { }.
+
+Contains:
+    - MIME types (file content types)
+    - upstream blocks (backend server groups)
+    - server blocks (virtual hosts / routing rules)
+
+
+--------------------------------------------------------------------------------
+LINES 5-6: MIME types
+--------------------------------------------------------------------------------
+
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+include /etc/nginx/mime.types:
+    Loads Nginx's built-in list of file extensions -> content types.
+    Examples:
+        .html  -> text/html
+        .css   -> text/css
+        .js    -> application/javascript
+        .json  -> application/json
+
+    Why needed?
+        When proxying to frontend, Nginx must send correct Content-Type headers
+        so the browser renders HTML/JS/CSS properly.
+
+default_type application/octet-stream:
+    Fallback type for unknown file extensions (raw binary download).
+    Rarely hit in our setup since we mostly proxy, not serve files directly.
+
+
+--------------------------------------------------------------------------------
+LINES 8-10: upstream frontend
+--------------------------------------------------------------------------------
+
+    upstream frontend {
+        server frontend:80;
+    }
+
+What is upstream?
+    Defines a group of backend servers Nginx can proxy to.
+    Named "frontend" — used later as proxy_pass http://frontend;
+
+server frontend:80:
+    | Part      | Meaning                                              |
+    |-----------|------------------------------------------------------|
+    | frontend  | Docker Compose SERVICE name (not container name)     |
+    | 80        | Port inside frontend container (Nginx serving React) |
+
+How Docker resolves "frontend":
+    1. todo_nginx is on app-network
+    2. Docker DNS resolves "frontend" -> todo_frontend container IP
+    3. Nginx connects to that IP on port 80
+
+Why upstream instead of writing proxy_pass http://frontend:80 directly?
+    Both work. upstream is cleaner when you might add more servers later:
+
+        upstream frontend {
+            server frontend:80;
+            server frontend2:80;   # load balancing (future)
+        }
+
+
+--------------------------------------------------------------------------------
+LINES 12-14: upstream backend
+--------------------------------------------------------------------------------
+
+    upstream backend {
+        server backend:8000;
+    }
+
+Same concept as frontend upstream.
+
+    | Part      | Meaning                                              |
+    |-----------|------------------------------------------------------|
+    | backend   | Docker Compose service name for FastAPI              |
+    | 8000      | Port uvicorn listens on (see backend/Dockerfile)     |
+
+Backend is NOT exposed to host — only reachable via this upstream on app-network.
+
+
+--------------------------------------------------------------------------------
+LINES 16-20: server block — listen and server_name
+--------------------------------------------------------------------------------
+
+    server {
+
+        listen 80;
+
+        server_name _;
+
+server { }:
+    Defines one virtual host (one site / one set of routing rules).
+
+listen 80:
+    Nginx listens on port 80 INSIDE the todo_nginx container.
+    docker-compose.yml maps host 8080 -> container 80:
+
+        ports:
+          - "8080:80"
+
+    So browser uses localhost:8080, but inside container Nginx sees port 80.
+
+server_name _;
+    "_" is a catch-all — accepts any hostname (localhost, IP address, domain).
+    Good for development and single-app VPS deployment.
+
+
+--------------------------------------------------------------------------------
+LINES 22-30: location /  (Frontend / React UI)
+--------------------------------------------------------------------------------
+
+    location / {
+
+        proxy_pass http://frontend;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+location /:
+    Matches ANY request path that does NOT match a more specific location.
+    BUT /api/ is more specific, so API requests go to backend block instead.
+
+    | Request path     | Matched by    |
+    |------------------|---------------|
+    | /                | location /    |
+    | /login           | location /    |
+    | /register        | location /    |
+    | /assets/index.js | location /    |
+    | /api/login       | location /api/  (more specific, wins) |
+
+proxy_pass http://frontend;
+    Forwards the full request to the frontend upstream (todo_frontend:80).
+    Path is NOT changed:
+        /login  -->  frontend receives /login
+        /       -->  frontend receives /
+
+    frontend/nginx.conf then uses try_files to serve index.html for SPA routes.
+
+proxy_set_header lines:
+    Passes original client info to the frontend container.
+
+    | Header              | Variable           | Example value        |
+    |---------------------|--------------------|----------------------|
+    | Host                | $host              | localhost:8080       |
+    | X-Real-IP           | $remote_addr       | 172.18.0.1           |
+    | X-Forwarded-For     | $proxy_add_x_...   | client IP chain      |
+    | X-Forwarded-Proto   | $scheme            | http (or https)      |
+
+    Frontend mostly ignores these for static files, but good practice for logs
+    and future features.
+
+
+--------------------------------------------------------------------------------
+LINES 32-40: location /api/  (Backend / FastAPI) — MOST IMPORTANT
+--------------------------------------------------------------------------------
+
+    location /api/ {
+
+        proxy_pass http://backend/;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+location /api/:
+  Matches any URL starting with /api/
+  Examples: /api/login, /api/todos, /api/refresh-token, /api/todos/5
+
+proxy_pass http://backend/;   <-- TRAILING SLASH IS CRITICAL
+    Strips the matched /api/ prefix before forwarding to FastAPI.
+
+    How Nginx rewrites the URL:
+
+    | Browser sends              | Backend receives           |
+    |----------------------------|----------------------------|
+    | POST /api/login            | POST /login                |
+    | GET  /api/todos            | GET  /todos                |
+    | POST /api/refresh-token    | POST /refresh-token        |
+    | PUT  /api/todos/3          | PUT  /todos/3              |
+    | DELETE /api/todos/3        | DELETE /todos/3            |
+
+    Why?
+        FastAPI routes are defined WITHOUT /api prefix:
+            router.post('/login')
+            router.get('/todos')
+
+        Frontend client.js uses API_BASE = '/api', so browser always calls /api/...
+        Nginx bridges the gap by stripping /api before hitting backend.
+
+WRONG config (no trailing slash):
+
+    location /api/ {
+        proxy_pass http://backend;    # NO trailing slash
+    }
+
+    Result:
+        /api/login  -->  backend receives /api/login  -->  404 Not Found
+
+RIGHT config (with trailing slash):
+
+    location /api/ {
+        proxy_pass http://backend/;   # WITH trailing slash
+    }
+
+    Result:
+        /api/login  -->  backend receives /login  -->  works!
+
+Same proxy_set_header lines as location / — backend can log real client IP.
+
+
+--------------------------------------------------------------------------------
+HOW location MATCHING PRIORITY WORKS
+--------------------------------------------------------------------------------
+
+Nginx picks the BEST matching location:
+
+    Request: GET /api/todos
+
+    Candidates:
+        location /       -> matches (prefix /)
+        location /api/   -> matches (prefix /api/)  <-- WINS (longer/more specific)
+
+    Request: GET /login
+
+    Candidates:
+        location /       -> matches  <-- WINS
+        location /api/   -> does NOT match
+
+Rule of thumb:
+    /api/ block must exist for API calls.
+    / block catches everything else (React UI).
+
+
+--------------------------------------------------------------------------------
+END-TO-END EXAMPLES USING THIS CONFIG
+--------------------------------------------------------------------------------
+
+Example 1: Open app homepage
+    Browser:     GET http://localhost:8080/
+    todo_nginx:  location /  ->  proxy_pass http://frontend
+    todo_frontend: serves index.html
+    Browser:     loads React app
+
+Example 2: React Router page refresh
+    Browser:     GET http://localhost:8080/login
+    todo_nginx:  location /  ->  proxy_pass http://frontend  (path unchanged)
+    todo_frontend: try_files -> index.html
+    Browser:     React shows Login page
+
+Example 3: Login API call (from client.js)
+    Browser:     POST http://localhost:8080/api/login  (+ JSON body)
+    todo_nginx:  location /api/  ->  proxy_pass http://backend/
+    todo_backend: receives POST /login
+    FastAPI:     authController.login() runs
+    Response:    backend -> nginx -> browser
+
+Example 4: Refresh token (credentials: include)
+    Browser:     POST http://localhost:8080/api/refresh-token  (+ cookie)
+    todo_nginx:  strips /api  ->  POST /refresh-token to backend
+    todo_backend: reads refresh_token cookie, returns new accessToken
+
+
+--------------------------------------------------------------------------------
+HOW THIS FILE IS LOADED IN DOCKER
+--------------------------------------------------------------------------------
+
+In docker-compose.yml:
+
+    nginx:
+      image: nginx:latest
+      container_name: todo_nginx
+      ports:
+        - "8080:80"
+      volumes:
+        - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+What happens:
+    1. Host file nginx/nginx.conf replaces default /etc/nginx/nginx.conf
+    2. :ro means read-only (container cannot modify the file)
+    3. Nginx reads this file on startup
+
+After editing nginx/nginx.conf:
+
+    docker compose restart nginx
+
+    Or test config inside container:
+
+        docker exec todo_nginx nginx -t
+
+
+--------------------------------------------------------------------------------
+nginx/nginx.conf vs frontend/nginx.conf — DO NOT CONFUSE
+--------------------------------------------------------------------------------
+
+| File                  | Container     | Role                              |
+|-----------------------|---------------|-----------------------------------|
+| nginx/nginx.conf      | todo_nginx    | Reverse proxy, routes / and /api/ |
+| frontend/nginx.conf   | todo_frontend | Serves React static files only    |
+
+nginx/nginx.conf     ->  "traffic cop" — decides frontend or backend
+frontend/nginx.conf  ->  "file server" — serves HTML/JS/CSS for React
+
+Browser NEVER talks to frontend/nginx.conf directly.
+Browser -> todo_nginx (nginx/nginx.conf) -> todo_frontend (frontend/nginx.conf)
+
+
+--------------------------------------------------------------------------------
+COMMON MISTAKES WITH THIS CONFIG
+--------------------------------------------------------------------------------
+
+1. Calling backend directly from React:
+       fetch('http://backend:8000/todos')   # WRONG — browser can't resolve Docker DNS
+       fetch('/api/todos')                  # CORRECT
+
+2. Removing trailing slash in proxy_pass:
+       proxy_pass http://backend;           # WRONG — /api/login -> /api/login
+       proxy_pass http://backend/;          # CORRECT — /api/login -> /login
+
+3. Exposing backend port 8000 to host unnecessarily:
+       Defeats purpose of reverse proxy security model.
+
+4. Forgetting to restart nginx after config change:
+       docker compose restart nginx
+
+5. Using localhost inside backend container for MySQL:
+       Use mysql:3306 (service name), not localhost.
+
+
+--------------------------------------------------------------------------------
+PRODUCTION UPGRADES FOR THIS CONFIG (FUTURE)
+--------------------------------------------------------------------------------
+
+1. Add HTTPS server block on port 443 with SSL certificate
+2. Redirect HTTP -> HTTPS
+3. Add client_max_body_size for large uploads
+4. Add rate limiting on location /api/:
+
+       limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+
+       location /api/ {
+           limit_req zone=api burst=20;
+           ...
+       }
+
+5. Add proxy_read_timeout for slow API responses
+6. Pin nginx image version: nginx:1.27-alpine instead of nginx:latest
+
+
+================================================================================

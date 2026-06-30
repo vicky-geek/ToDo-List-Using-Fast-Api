@@ -2,6 +2,156 @@
 
 A FastAPI-based ToDo application with authentication, role-based access, and MySQL persistence.
 
+## Project Structure
+
+```text
+ToDo/
+│
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── package.json
+│   ├── vite.config.js
+│   └── src/
+│       ├── api/
+│       ├── components/
+│       ├── context/
+│       └── ...
+│
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── main.py
+│   ├── controllers/
+│   ├── routes/
+│   ├── middleware/
+│   ├── utils/
+│   └── database/
+│       ├── database.py
+│       └── schema.sql
+│
+├── nginx/
+│   └── nginx.conf
+│
+├── docker-compose.yml
+├── docker-compose.hub.yml
+├── .env
+└── .env.example
+```
+
+## Services
+
+| Service | Container | Port | Description |
+|---------|-----------|------|-------------|
+| **MySQL** | `todo_mysql` | 3307 (host) | Database |
+| **Backend** | `todo_backend` | 8000 (internal) | FastAPI REST API |
+| **Frontend** | `todo_frontend` | 80 (internal) | React app served by Nginx |
+| **Nginx** | `todo_nginx` | 80 (public) | Reverse proxy — routes `/` to frontend, `/api/` to backend |
+
+## Quick Start
+
+1. Copy environment file:
+
+```bash
+cp .env.example .env
+```
+
+2. Build and run all services:
+
+```bash
+docker compose up --build
+```
+
+3. Open the app at [http://localhost](http://localhost)
+
+## How It Works
+
+### Backend (`backend/`)
+
+FastAPI server running on port `8000` inside the Docker network.
+
+```dockerfile
+# backend/Dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+API routes (no `/api` prefix on the backend itself):
+
+- `POST /register`, `POST /login`, `GET /logout`, `POST /refresh-token`
+- `GET /todos`, `POST /todos`, `GET /todo`, `PUT /todos/{id}`, `DELETE /todos/{id}`
+
+### Frontend (`frontend/`)
+
+React + Vite app. Built into static files and served by its own Nginx container on port `80`.
+
+```dockerfile
+# frontend/Dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
+EXPOSE 80
+```
+
+`npm run build` creates a `dist/` folder that gets copied into the frontend Nginx container.
+
+### Nginx Reverse Proxy (`nginx/`)
+
+A separate Nginx container acts as the single public entry point:
+
+- `location /` → proxies to `frontend:80` (React UI)
+- `location /api/` → proxies to `backend:8000` (strips `/api` prefix)
+
+```nginx
+location /api/ {
+    proxy_pass http://backend/;
+}
+```
+
+So a browser request to `/api/login` reaches the backend as `/login`.
+
+### Docker Compose
+
+All services run on a shared `app-network`. Only Nginx exposes port `80` to the host.
+
+```bash
+docker compose up --build -d    # start in background
+docker compose down             # stop all services
+docker compose logs -f nginx    # view nginx logs
+```
+
+## Local Development (without Docker)
+
+**Backend:**
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+**Frontend:**
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Vite dev server proxies `/api` requests to `http://localhost:8000`.
+
 ## Branches
 
 This repository is organized into branches, each representing a different deployment setup.
@@ -10,37 +160,29 @@ This repository is organized into branches, each representing a different deploy
 
 The base branch. It contains only the **FastAPI backend** with **Docker** support.
 
-- REST API for auth (register, login, logout, token refresh) and todo CRUD
+- REST API for auth and todo CRUD
 - MySQL database with connection pooling
 - `docker-compose.yml` runs the backend and MySQL as containers
 
-Use this branch if you only need the API and want a simple containerized backend.
+Use this branch if you only need the API.
 
 ### 2. `kubernetes-integration`
 
 Extends the backend from `main` with **Kubernetes** deployment configuration.
 
 - Same FastAPI backend and MySQL setup as `main`
-- Kubernetes manifests for deploying the app in a cluster (e.g. Minikube or a cloud provider)
-- Suited for learning or running the backend in a Kubernetes environment
+- Kubernetes manifests for cluster deployment
 
-Use this branch when you want to deploy and manage the backend with Kubernetes instead of plain Docker Compose.
+Use this branch when you want to deploy with Kubernetes.
 
 ### 3. `nginx-reverse-proxy-with-frontnd`
 
-The **full-stack** branch extend from main branch. It adds a **React frontend** and **Nginx** as a reverse proxy, with every service containerized.
-
-| Service | Role |
-|---------|------|
-| **React frontend** | Web UI for login, registration, and todo management |
-| **FastAPI backend** | API server (not exposed directly to the internet) |
-| **MySQL** | Database |
-| **Nginx** | Single entry point on port 80 — serves the frontend and proxies `/api` to the backend |
+The **full-stack** branch. Adds a **React frontend** and **Nginx** reverse proxy with every service containerized.
 
 **Why Nginx?**
 
 - One public URL for the whole app (frontend + API)
-- Frontend and backend appear on the same origin, so auth cookies and API calls work without CORS issues
+- Frontend and backend share the same origin — no CORS issues
 - Easy to deploy on a **single VPS**: run `docker compose up` and expose port 80
 
 **Why containerize each service?**

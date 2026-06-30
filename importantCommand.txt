@@ -1,0 +1,276 @@
+If your `docker-compose.yml` contains **frontend**, **backend**, and **MySQL**, here are the most commonly used commands.
+
+---
+
+## 1. Build and start all containers
+
+If it's the first time or you've changed the Dockerfile:
+
+```bash
+docker compose up --build
+```
+
+Run in detached mode (background):
+
+```bash
+docker compose up --build -d
+```
+
+This command:
+
+* Builds the images (if needed)
+* Creates containers
+* Starts frontend, backend, and MySQL
+
+---
+
+## 2. Stop all containers
+
+Stop the containers without deleting them:
+
+```bash
+docker compose stop
+```
+
+---
+
+## 3. Start again without rebuilding
+
+If nothing has changed in the Dockerfiles:
+
+```bash
+docker compose start
+```
+
+Or simply:
+
+```bash
+docker compose up -d
+```
+
+Docker will reuse the existing images and containers.
+
+---
+
+## 4. Stop and remove containers
+
+If you want to stop and remove the containers (but keep images):
+
+```bash
+docker compose down
+```
+
+---
+
+## 5. Stop and remove everything including volumes
+
+This also deletes MySQL data stored in Docker volumes:
+
+```bash
+docker compose down -v
+```
+
+> ⚠️ Only use `-v` if you don't need the database data.
+
+---
+
+# After making changes
+
+### Case 1: Only changed backend source code
+
+### If you are using bind mounts (recommended for development)
+
+Example:
+
+```yaml
+services:
+  backend:
+    volumes:
+      - ./backend:/app
+```
+
+You usually **don't need to rebuild**.
+
+If your Node.js app uses `nodemon`, it reloads automatically.
+
+Otherwise, restart only the backend:
+
+```bash
+docker compose restart backend
+```
+
+---
+
+### Case 2: Changed backend Dockerfile
+
+Example:
+
+* Added a package
+* Changed Node version
+* Changed system dependencies
+
+Rebuild only the backend:
+
+```bash
+docker compose up --build backend
+```
+
+Or:
+
+```bash
+docker compose build backend
+docker compose up -d backend
+```
+
+---
+
+### Case 3: Changed `package.json`
+
+If your Dockerfile installs dependencies:
+
+```dockerfile
+COPY package*.json ./
+RUN npm install
+```
+
+Then rebuild the backend:
+
+```bash
+docker compose up --build backend
+```
+
+---
+
+### Case 4: Changed only frontend
+
+Rebuild only the frontend:
+
+```bash
+docker compose up --build frontend
+```
+
+---
+
+### Case 5: Changed `docker-compose.yml`
+
+For example:
+
+* Added an environment variable
+* Changed ports
+* Added a volume
+
+Run:
+
+```bash
+docker compose up -d
+```
+
+If the change requires recreating containers:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+---
+
+# View running containers
+
+```bash
+docker compose ps
+```
+
+---
+
+# View logs
+
+All services:
+
+```bash
+docker compose logs
+```
+
+Backend only:
+
+```bash
+docker compose logs backend
+```
+
+Follow logs live:
+
+```bash
+docker compose logs -f backend
+```
+
+---
+
+# Enter a running container
+
+Backend:
+
+```bash
+docker compose exec backend sh
+```
+
+If the image has Bash:
+
+```bash
+docker compose exec backend bash
+```
+
+---
+
+# Common workflow
+
+### First time
+
+```bash
+docker compose up --build -d
+```
+
+### Stop
+
+```bash
+docker compose stop
+```
+
+### Start again
+
+```bash
+docker compose start
+```
+
+### Backend code changes (with bind mounts)
+
+```bash
+docker compose restart backend
+```
+
+### Backend Dockerfile or dependency changes
+
+```bash
+docker compose up --build backend -d
+```
+
+### Remove everything
+
+```bash
+docker compose down
+```
+
+---
+
+### Summary
+
+| Task                       | Command                                |
+| -------------------------- | -------------------------------------- |
+| Build and start everything | `docker compose up --build -d`         |
+| Start existing containers  | `docker compose start`                 |
+| Stop containers            | `docker compose stop`                  |
+| Stop and remove containers | `docker compose down`                  |
+| Rebuild only backend       | `docker compose up --build backend -d` |
+| Restart only backend       | `docker compose restart backend`       |
+| Show running containers    | `docker compose ps`                    |
+| View backend logs          | `docker compose logs -f backend`       |
+| Enter backend container    | `docker compose exec backend sh`       |
+
+These commands work with modern Docker Compose (`docker compose`). If you're using the older standalone Compose, replace `docker compose` with `docker-compose`.
