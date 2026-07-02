@@ -25,7 +25,7 @@ async def getToDos(response: Response):
         cursor.execute("SELECT id, task, priority, description FROM todos")
         rows = cursor.fetchall()
         response.status_code = status.HTTP_200_OK
-        return {"data": rows, "from": "cicd pipeline"}
+        return {"data": rows, "from": "cicd pipeline changed"}
     except Error as e:
         print("Error:", e)
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
