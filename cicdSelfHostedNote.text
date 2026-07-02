@@ -1,0 +1,455 @@
+================================================================================
+CI/CD WITH GITHUB SELF-HOSTED RUNNER (LOCAL MACHINE)
+================================================================================
+
+Branch: ci-cd-pipeline-local-machine
+Created from: ci-cd-pipeline
+
+This branch runs CI/CD on YOUR local machine using a GitHub self-hosted runner
+instead of GitHub's cloud runners (ubuntu-latest).
+
+Workflow file: .github/workflows/deploy.yml
+Job name:     deploy-self-hosted (only this job runs when you push THIS branch)
+See section:  0A — which job runs on push
+
+
+================================================================================
+0. BRANCH LINEAGE — WHY THIS BRANCH EXISTS
+================================================================================
+
+    laodBalance-and-rateLimiting
+        Full stack: React + Nginx + 2 backends + load balancing + rate limiting
+            |
+            v
+    ci-cd-pipeline  (PARENT BRANCH)
+        Adds: GitHub Actions (cloud runner ubuntu-latest)
+              Build backend + frontend images
+              Push to Docker Hub
+              Deploy to VPS via SSH
+        Files: deploy.yml (deploy-cloud job), docker-compose.dockerhub.yml
+        Notes: cicdNote.text
+            |
+            v
+    ci-cd-pipeline-local-machine  (THIS BRANCH — YOU ARE HERE)
+        Adds: Self-hosted GitHub Actions runner on local PC
+              Same build + push to Docker Hub
+              Deploy with docker compose on SAME machine (no SSH)
+        Changes: deploy.yml (deploy-self-hosted job)
+        Notes: cicdSelfHostedNote.text (this file)
+
+
+Why create this branch from ci-cd-pipeline?
+    - Learn CI/CD without needing a VPS
+    - Test full pipeline on your laptop before production deploy
+    - Reuse local Docker cache — faster builds
+    - No GitHub Actions minutes used
+    - No SSH secrets setup required
+
+
+What is SAME as ci-cd-pipeline:
+    - Full app stack (mysql, backend, backend2, frontend, nginx)
+    - docker-compose.dockerhub.yml
+    - Docker Hub images: vickygeek/todo_fast_api, vickygeek/todo_frontend
+    - Build steps in deploy.yml
+
+What is DIFFERENT from ci-cd-pipeline:
+    | | ci-cd-pipeline | ci-cd-pipeline-local-machine |
+    |---|----------------|------------------------------|
+    | Runner | ubuntu-latest (GitHub cloud) | self-hosted (your PC) |
+    | Job | deploy-cloud | deploy-self-hosted |
+    | After push to Hub | SSH to VPS | docker compose up locally |
+    | Secrets | Docker + SSH (5 secrets) | Docker only (2 secrets) |
+    | App URL after deploy | http://VPS_IP:8080 | http://localhost:8080 |
+
+
+How to switch between branches:
+
+    # Cloud CI/CD (VPS deploy)
+    git checkout ci-cd-pipeline
+    git push origin ci-cd-pipeline
+
+    # Local self-hosted CI/CD
+    git checkout ci-cd-pipeline-local-machine
+    git push origin ci-cd-pipeline-local-machine
+
+Both branches share the same deploy.yml file with two jobs.
+Only the matching job runs based on branch name.
+
+
+================================================================================
+0A. WHICH JOB RUNS WHEN YOU PUSH? (deploy-cloud vs deploy-self-hosted)
+================================================================================
+
+deploy.yml has TWO jobs. GitHub runs ONLY ONE per push — never both.
+
+    Job 1: deploy-cloud
+        if: github.ref != 'refs/heads/ci-cd-pipeline-local-machine'
+        runs-on: ubuntu-latest
+        -> build, push Docker Hub, SSH deploy to VPS
+
+    Job 2: deploy-self-hosted  (THIS BRANCH)
+        if: github.ref == 'refs/heads/ci-cd-pipeline-local-machine'
+        runs-on: self-hosted
+        -> build, push Docker Hub, docker compose up on your PC
+
+
+--------------------------------------------------------------------------------
+On THIS branch (ci-cd-pipeline-local-machine):
+--------------------------------------------------------------------------------
+
+    git push origin ci-cd-pipeline-local-machine
+
+        deploy-self-hosted  -> RUNS on your local runner
+        deploy-cloud        -> SKIPPED
+
+
+--------------------------------------------------------------------------------
+On other branches (main, laodBalance-and-rateLimiting, ci-cd-pipeline):
+--------------------------------------------------------------------------------
+
+    git push origin main
+
+        deploy-cloud        -> RUNS on GitHub cloud
+        deploy-self-hosted  -> SKIPPED
+
+
+--------------------------------------------------------------------------------
+Full table
+--------------------------------------------------------------------------------
+
+    | Push to branch | Runs | Skipped | Where | Deploy |
+    |----------------|------|---------|-------|--------|
+    | ci-cd-pipeline-local-machine | deploy-self-hosted | deploy-cloud | Your PC | localhost:8080 |
+    | ci-cd-pipeline | deploy-cloud | deploy-self-hosted | GitHub cloud | VPS via SSH |
+    | main | deploy-cloud | deploy-self-hosted | GitHub cloud | VPS via SSH |
+    | laodBalance-and-rateLimiting | deploy-cloud | deploy-self-hosted | GitHub cloud | VPS via SSH |
+
+
+--------------------------------------------------------------------------------
+GitHub Actions UI after push to THIS branch:
+--------------------------------------------------------------------------------
+
+    Build and Deploy workflow
+        |
+        +-- deploy-cloud         [Skipped]
+        +-- deploy-self-hosted   [Success]  <- your job
+
+Skipped is NORMAL — means the `if` condition did not match that branch.
+
+
+One-line answer:
+    Push to ci-cd-pipeline-local-machine -> only deploy-self-hosted runs.
+
+
+================================================================================
+1. CLOUD RUNNER vs SELF-HOSTED RUNNER
+================================================================================
+
+    | | Cloud runner (ubuntu-latest) | Self-hosted runner (local) |
+    |---|-------------------------------|----------------------------|
+    | Where it runs | GitHub servers | Your PC / laptop |
+    | Branch | main, laodBalance-and-rateLimiting | ci-cd-pipeline-local-machine |
+    | Job name | deploy-cloud | deploy-self-hosted |
+    | Build Docker images | On GitHub server | On your machine |
+    | Push to Docker Hub | Yes | Yes |
+    | Deploy | SSH to remote VPS | docker compose on same machine |
+    | Needs SSH secrets | Yes (HOST, USERNAME, SSH_KEY) | No |
+    | Needs Docker on runner | No (GitHub provides) | Yes — Docker must be installed locally |
+
+Why use self-hosted runner?
+    - Learn how CI/CD works on your own machine
+    - No SSH/VPS needed for testing deploy
+    - Faster builds if you reuse local Docker cache
+    - Free — no GitHub Actions minutes used for this job
+
+
+================================================================================
+2. PIPELINE FLOW (SELF-HOSTED)
+================================================================================
+
+    git push origin ci-cd-pipeline-local-machine
+        |
+        v
+    GitHub triggers workflow
+        |
+        v
+    Self-hosted runner on YOUR machine picks up job
+        |
+        +-- git checkout (Actions checkout step)
+        +-- docker login (DOCKER_USERNAME, DOCKER_PASSWORD secrets)
+        +-- docker build + push vickygeek/todo_fast_api:latest
+        +-- docker build + push vickygeek/todo_frontend:latest
+        +-- docker compose -f docker-compose.dockerhub.yml pull
+        +-- docker compose -f docker-compose.dockerhub.yml up -d
+        |
+        v
+    App running locally at http://localhost:8080
+
+
+================================================================================
+3. ONE-TIME SETUP — INSTALL SELF-HOSTED RUNNER
+================================================================================
+
+Prerequisites on your local machine:
+    - Docker installed and running
+    - Docker Compose plugin
+    - Git
+    - .env file in project folder (cp .env.example .env)
+    - User in docker group (or use sudo — not recommended for runner)
+
+
+Step 1: Go to GitHub repo settings
+------------------------------------
+
+    GitHub repo -> Settings -> Actions -> Runners -> New self-hosted runner
+
+    Select: Linux (your OS)
+
+    GitHub shows commands like:
+
+        mkdir actions-runner && cd actions-runner
+        curl -o actions-runner-linux-x64-2.xxx.tar.gz -L https://github.com/...
+        tar xzf ./actions-runner-linux-x64-2.xxx.tar.gz
+        ./config.sh --url https://github.com/YOUR_USER/ToDo --token XXXXX
+        ./run.sh
+
+
+Step 2: Run config on your machine
+------------------------------------
+
+    # Example — use exact commands from YOUR GitHub settings page
+    mkdir -p ~/actions-runner && cd ~/actions-runner
+    # download + extract runner (from GitHub UI)
+    ./config.sh --url https://github.com/YOUR_USERNAME/ToDo --token YOUR_TOKEN
+
+    When asked for runner name:
+        todo-local-runner   (or any name)
+
+    When asked for labels:
+        Press Enter for default (includes "self-hosted")
+
+    When asked for work folder:
+        Press Enter for default (_work)
+
+
+Step 3: Start the runner
+------------------------
+
+    # Foreground (testing)
+    ./run.sh
+
+    # Background (recommended) — install as service
+    sudo ./svc.sh install
+    sudo ./svc.sh start
+    sudo ./svc.sh status
+
+
+Step 4: Verify runner online
+----------------------------
+
+    GitHub repo -> Settings -> Actions -> Runners
+
+    Status should show: Idle (green) with label "self-hosted"
+
+
+================================================================================
+4. GITHUB SECRETS (SELF-HOSTED)
+================================================================================
+
+Required secrets (same as cloud pipeline for Docker Hub):
+
+    | Secret | Required for self-hosted? |
+    |--------|---------------------------|
+    | DOCKER_USERNAME | YES |
+    | DOCKER_PASSWORD | YES |
+    | HOST | NO (SSH not used) |
+    | USERNAME | NO |
+    | SSH_PRIVATE_KEY | NO |
+
+Add secrets: Repo -> Settings -> Secrets and variables -> Actions
+
+
+================================================================================
+5. deploy.yml — WHAT CHANGED
+================================================================================
+
+Two jobs in one workflow file:
+
+    A) deploy-cloud
+       if: branch is NOT ci-cd-pipeline-local-machine
+       runs-on: ubuntu-latest
+       -> build, push, SSH deploy to VPS
+
+    B) deploy-self-hosted
+       if: branch IS ci-cd-pipeline-local-machine
+       runs-on: self-hosted
+       -> build, push, docker compose up on local machine
+
+Self-hosted deploy step (no SSH):
+
+    - name: Deploy on local machine
+      run: |
+        docker compose -f docker-compose.dockerhub.yml pull
+        docker compose -f docker-compose.dockerhub.yml up -d
+
+Project path on runner:
+    GitHub Actions checks out code to:
+        ~/actions-runner/_work/ToDo/ToDo/
+    docker compose runs from that checkout directory.
+
+
+================================================================================
+6. LOCAL MACHINE REQUIREMENTS BEFORE FIRST RUN
+================================================================================
+
+    1. .env file must exist in repo checkout OR set env on machine
+       For CI checkout, create .env in repo root before push OR
+       copy .env.example to .env on first manual setup in project folder
+
+       Note: .env is gitignored — for self-hosted runner the checkout won't
+       have .env. You must either:
+       (a) Place .env in project folder and runner uses same path, OR
+       (b) Create .env manually in _work folder after first run, OR
+       (c) Add .env variables as GitHub secrets and write .env in workflow
+
+    Recommended for local testing:
+        Keep .env in /home/you/Desktop/vicky/Python/ToDo/.env
+        Runner _work is different path — ADD this step to workflow if needed:
+
+        cp /path/to/your/.env .env
+
+    Or symlink (one-time on machine):
+        ln -s /home/geek-pc/Desktop/vicky/Python/ToDo/.env \
+          ~/actions-runner/_work/ToDo/ToDo/.env
+
+    Simplest fix — add to workflow before compose up:
+        env file from secrets (future) OR document manual .env copy
+
+
+================================================================================
+7. HOW TO TEST
+================================================================================
+
+    1. Ensure runner is online (GitHub -> Settings -> Actions -> Runners)
+    2. Start runner: cd ~/actions-runner && ./run.sh  (if not installed as service)
+    3. Make a small change and commit:
+
+        git checkout ci-cd-pipeline-local-machine
+        git add .
+        git commit -m "test self-hosted pipeline"
+        git push origin ci-cd-pipeline-local-machine
+
+    4. Watch: GitHub repo -> Actions tab -> "Build and Deploy" workflow
+    5. Job should show: deploy-self-hosted (self-hosted)
+    6. Open http://localhost:8080
+
+
+================================================================================
+8. RUNNER COMMANDS CHEAT SHEET
+================================================================================
+
+    # Start runner (foreground)
+    cd ~/actions-runner && ./run.sh
+
+    # Install as background service
+    cd ~/actions-runner
+    sudo ./svc.sh install
+    sudo ./svc.sh start
+    sudo ./svc.sh status
+    sudo ./svc.sh stop
+
+    # Remove runner
+    sudo ./svc.sh stop
+    sudo ./svc.sh uninstall
+    ./config.sh remove --token TOKEN_FROM_GITHUB
+
+    # Check Docker works (same user as runner)
+    docker ps
+    docker compose version
+
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+Problem: Job queued forever, never starts
+    Fix: Runner offline — run ./run.sh or sudo ./svc.sh start
+         Check GitHub -> Runners shows "Idle"
+
+Problem: permission denied on docker.sock
+    Fix: Add runner user to docker group:
+         sudo usermod -aG docker $USER
+         # restart runner service
+    Or runner was started as different user than docker group member
+
+Problem: .env not found during compose up
+    Fix: .env is gitignored — copy manually to _work folder or add workflow step
+         cp /home/geek-pc/Desktop/vicky/Python/ToDo/.env .env
+
+Problem: docker compose pull fails
+    Fix: docker login first — check DOCKER_USERNAME/PASSWORD secrets
+         Ensure images exist on Hub: todo_fast_api, todo_frontend
+
+Problem: wrong job runs (cloud instead of self-hosted)
+    Fix: Push to ci-cd-pipeline-local-machine branch only
+         deploy-self-hosted has: if: github.ref == 'refs/heads/ci-cd-pipeline-local-machine'
+
+Problem: Layer already exists on push, Hub shows old date
+    Fix: docker build --no-cache before push (see dockerNote.text)
+
+
+================================================================================
+10. BRANCH STRATEGY
+================================================================================
+
+    Branch tree:
+
+        laodBalance-and-rateLimiting
+            └── ci-cd-pipeline
+                    └── ci-cd-pipeline-local-machine
+
+    | Branch | Parent | CI/CD | Deploy target |
+    |--------|--------|-------|---------------|
+    | laodBalance-and-rateLimiting | nginx-reverse-proxy-with-frontnd | None | Manual compose |
+    | ci-cd-pipeline | laodBalance-and-rateLimiting | Cloud runner | VPS (SSH) |
+    | ci-cd-pipeline-local-machine | ci-cd-pipeline | Self-hosted | Local PC |
+
+    When done testing on ci-cd-pipeline-local-machine:
+        - Merge learnings into ci-cd-pipeline for VPS production deploy
+        - Or keep both branches for dev (local) vs prod (VPS)
+
+
+================================================================================
+11. OPTIONAL — ADD .env TO WORKFLOW (ADVANCED)
+================================================================================
+
+If .env is missing in checkout, add step before deploy:
+
+    - name: Create .env from secrets
+      run: |
+        cat > .env << EOF
+        DB_HOST=mysql
+        DB_USER=root
+        DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+        DB_NAME=todo_db
+        JWT_SECRET=${{ secrets.JWT_SECRET }}
+        ...
+        EOF
+
+Then add DB_PASSWORD, JWT_SECRET etc. as GitHub secrets.
+
+
+================================================================================
+12. QUICK REFERENCE
+================================================================================
+
+    Branch:        ci-cd-pipeline-local-machine
+    Parent:        ci-cd-pipeline
+    Workflow:      .github/workflows/deploy.yml
+    Job:           deploy-self-hosted
+    Runner label:  self-hosted
+    App URL:       http://localhost:8080
+    Notes:         cicdSelfHostedNote.text (this file)
+    Parent notes:  cicdNote.text (cloud VPS deploy)
+
+================================================================================

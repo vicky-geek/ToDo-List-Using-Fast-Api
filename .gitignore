@@ -6,3 +6,4 @@ __pycache__/
 logs/
 logs/backend/
 logs/backend2/
+actions-runner/

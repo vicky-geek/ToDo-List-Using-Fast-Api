@@ -2,8 +2,90 @@
 CI/CD PIPELINE NOTES - GitHub Actions + Docker Hub + VPS Deploy
 ================================================================================
 
-This project uses GitHub Actions to build Docker images, push to Docker Hub,
-and deploy to VPS automatically on git push.
+This file covers:
+- Branch lineage (ci-cd-pipeline from laodBalance-and-rateLimiting)
+- Which job runs on push (deploy-cloud vs deploy-self-hosted)
+- Cloud runner CI/CD + Docker Hub + VPS deploy via SSH
+- See cicdSelfHostedNote.text for self-hosted runner on local machine
+
+
+================================================================================
+0. CI/CD BRANCHES — LINEAGE AND PURPOSE
+================================================================================
+
+    laodBalance-and-rateLimiting
+        |  (full stack + load balancing + rate limiting)
+        v
+    ci-cd-pipeline
+        |  (adds GitHub Actions + Docker Hub + SSH deploy to VPS)
+        v
+    ci-cd-pipeline-local-machine
+           (adds self-hosted runner — deploy on local PC, no SSH)
+
+
+--------------------------------------------------------------------------------
+Branch: ci-cd-pipeline
+--------------------------------------------------------------------------------
+
+Created from:  laodBalance-and-rateLimiting
+
+Purpose:
+    Automate build, push to Docker Hub, and deploy to REMOTE VPS using
+    GitHub's cloud runners (ubuntu-latest).
+
+What this branch adds:
+    - .github/workflows/deploy.yml  -> deploy-cloud job
+    - docker-compose.dockerhub.yml  -> pull images on server
+    - cicdNote.text                 -> this file
+
+Trigger branches in deploy.yml:
+    - main
+    - laodBalance-and-rateLimiting
+    - ci-cd-pipeline-local-machine (runs different job — self-hosted)
+
+Deploy flow:
+    git push -> GitHub cloud runner -> build -> push Hub -> SSH VPS -> compose up
+
+Secrets needed:
+    DOCKER_USERNAME, DOCKER_PASSWORD, HOST, USERNAME, SSH_PRIVATE_KEY
+
+
+--------------------------------------------------------------------------------
+Branch: ci-cd-pipeline-local-machine
+--------------------------------------------------------------------------------
+
+Created from:  ci-cd-pipeline
+
+Purpose:
+    Same CI/CD (build + push Docker Hub) but runner runs on YOUR local machine.
+    Deploy with docker compose locally — no VPS/SSH required for testing.
+
+What this branch adds/changes:
+    - deploy-self-hosted job in deploy.yml (runs-on: self-hosted)
+    - cicdSelfHostedNote.text  -> full self-hosted runner guide
+
+Trigger:
+    Push to ci-cd-pipeline-local-machine only runs deploy-self-hosted job.
+
+Deploy flow:
+    git push -> local self-hosted runner -> build -> push Hub -> compose up locally
+
+Secrets needed:
+    DOCKER_USERNAME, DOCKER_PASSWORD only (no SSH secrets)
+
+See: cicdSelfHostedNote.text for runner installation and .env setup.
+
+
+--------------------------------------------------------------------------------
+Which branch should I use?
+--------------------------------------------------------------------------------
+
+    | Goal | Branch |
+    |------|--------|
+    | Deploy to VPS on every push | ci-cd-pipeline |
+    | Learn CI/CD on local PC | ci-cd-pipeline-local-machine |
+    | Manual docker compose only | laodBalance-and-rateLimiting |
+    | No CI/CD, backend only | main |
 
 
 ================================================================================
@@ -109,14 +191,87 @@ NOT built by CI/CD (official images pulled on VPS):
 
 
 ================================================================================
-7. TRIGGER BRANCHES
+7. TWO JOBS IN deploy.yml — WHICH ONE RUNS ON PUSH?
 ================================================================================
 
-Workflow runs on push to:
+deploy.yml contains TWO jobs. Only ONE runs per push — never both at once.
+
+    deploy-cloud        -> GitHub cloud runner + SSH deploy to VPS
+    deploy-self-hosted  -> Your local machine + docker compose deploy
+
+GitHub decides using the `if` condition on each job:
+
+    deploy-cloud:
+        if: github.ref != 'refs/heads/ci-cd-pipeline-local-machine'
+
+    deploy-self-hosted:
+        if: github.ref == 'refs/heads/ci-cd-pipeline-local-machine'
+
+
+--------------------------------------------------------------------------------
+Which job runs for each branch?
+--------------------------------------------------------------------------------
+
+    | Branch you push to | Job that RUNS | Job SKIPPED | Runner | Deploy |
+    |--------------------|---------------|-------------|--------|--------|
+    | ci-cd-pipeline-local-machine | deploy-self-hosted | deploy-cloud | self-hosted (your PC) | local compose |
+    | main | deploy-cloud | deploy-self-hosted | ubuntu-latest (GitHub) | SSH -> VPS |
+    | laodBalance-and-rateLimiting | deploy-cloud | deploy-self-hosted | ubuntu-latest (GitHub) | SSH -> VPS |
+    | ci-cd-pipeline | deploy-cloud | deploy-self-hosted | ubuntu-latest (GitHub) | SSH -> VPS |
+
+
+--------------------------------------------------------------------------------
+Examples
+--------------------------------------------------------------------------------
+
+    # Only deploy-self-hosted runs
+    git push origin ci-cd-pipeline-local-machine
+
+    # Only deploy-cloud runs
+    git push origin main
+    git push origin laodBalance-and-rateLimiting
+    git push origin ci-cd-pipeline
+
+
+--------------------------------------------------------------------------------
+What you see in GitHub Actions UI
+--------------------------------------------------------------------------------
+
+Push to ci-cd-pipeline-local-machine:
+
+    deploy-cloud         -> Skipped
+    deploy-self-hosted   -> Running / Success
+
+Push to main (or laodBalance-and-rateLimiting):
+
+    deploy-cloud         -> Running / Success
+    deploy-self-hosted   -> Skipped
+
+"Skipped" means the `if` condition was false — this is normal, not an error.
+
+
+--------------------------------------------------------------------------------
+Why two jobs in one file?
+--------------------------------------------------------------------------------
+
+    - Same workflow file shared across branches
+    - Branch name automatically picks the right deploy method
+    - No need for two separate workflow files
+
+One-line rule:
+    ci-cd-pipeline-local-machine branch -> self-hosted job
+    Any other trigger branch          -> cloud job
+
+
+--------------------------------------------------------------------------------
+Trigger branches (workflow starts on push to)
+--------------------------------------------------------------------------------
+
     - main
     - laodBalance-and-rateLimiting
+    - ci-cd-pipeline-local-machine
 
-Edit .github/workflows/deploy.yml to change branches:
+Edit .github/workflows/deploy.yml to add more branches:
 
     on:
       push:
@@ -166,6 +321,14 @@ Problem: nginx.conf not found on VPS
 Problem: .env missing on VPS
     Fix: Create .env manually on VPS (never commit to Git)
 
+Problem: Wrong job ran (expected self-hosted but cloud ran)
+    Fix: Check which branch you pushed — only ci-cd-pipeline-local-machine
+         triggers deploy-self-hosted. See section 7 above.
+
+Problem: Both jobs show Skipped
+    Fix: Push must be to main, laodBalance-and-rateLimiting, or
+         ci-cd-pipeline-local-machine (listed in deploy.yml on: push: branches)
+
 
 ================================================================================
 10. QUICK REFERENCE
@@ -175,5 +338,8 @@ Problem: .env missing on VPS
     App URL       ->  http://YOUR_VPS_IP:8080
     View logs     ->  docker compose -f docker-compose.dockerhub.yml logs -f
     Restart       ->  docker compose -f docker-compose.dockerhub.yml restart
+
+Self-hosted runner (local machine):
+    See cicdSelfHostedNote.text for full setup on branch ci-cd-pipeline-local-machine
 
 ================================================================================

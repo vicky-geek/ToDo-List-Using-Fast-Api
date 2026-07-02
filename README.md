@@ -223,3 +223,62 @@ git checkout laodBalance-and-rateLimiting
 docker compose up --build -d
 # App: http://localhost:8080
 ```
+
+### 5. `ci-cd-pipeline`
+
+Created from **`laodBalance-and-rateLimiting`**. Adds **CI/CD with GitHub Actions** using **cloud runners** and deploy to **VPS via SSH**.
+
+| Feature | Description |
+|---------|-------------|
+| **GitHub Actions** | `.github/workflows/deploy.yml` — auto build on push |
+| **Docker Hub** | Pushes `vickygeek/todo_fast_api` and `vickygeek/todo_frontend` |
+| **Cloud runner** | `ubuntu-latest` (GitHub-hosted) |
+| **Deploy** | SSH to VPS → `docker compose -f docker-compose.dockerhub.yml up -d` |
+
+**Files added:**
+
+- `.github/workflows/deploy.yml` — `deploy-cloud` job
+- `docker-compose.dockerhub.yml` — pull images on VPS
+- `cicdNote.text` — cloud CI/CD setup guide
+
+Use this branch for **production-style deploy to remote VPS** on git push.
+
+### 6. `ci-cd-pipeline-local-machine`
+
+Created from **`ci-cd-pipeline`**. Same CI/CD pipeline but uses a **GitHub self-hosted runner** on your **local machine** instead of cloud runners.
+
+| Feature | Description |
+|---------|-------------|
+| **Self-hosted runner** | Workflow runs on your PC (`runs-on: self-hosted`) |
+| **Same build/push** | Builds and pushes backend + frontend to Docker Hub |
+| **Local deploy** | `docker compose up` on your machine — **no SSH to VPS** |
+| **Job name** | `deploy-self-hosted` in `deploy.yml` |
+
+**What changed from `ci-cd-pipeline`:**
+
+| | `ci-cd-pipeline` | `ci-cd-pipeline-local-machine` |
+|---|------------------|-------------------------------|
+| Runner | GitHub cloud (`ubuntu-latest`) | Your local machine (`self-hosted`) |
+| Deploy target | Remote VPS via SSH | Local machine |
+| SSH secrets | Required | Not required |
+| Docker on runner | Not needed | Required locally |
+
+**Documentation:**
+
+- [cicdSelfHostedNote.text](cicdSelfHostedNote.text) — self-hosted runner setup (full guide)
+- [cicdNote.text](cicdNote.text) — cloud CI/CD notes (parent branch)
+
+**Branch tree:**
+
+```text
+laodBalance-and-rateLimiting
+    └── ci-cd-pipeline              (cloud runner → VPS)
+            └── ci-cd-pipeline-local-machine   (self-hosted → local PC)
+```
+
+```bash
+git checkout ci-cd-pipeline-local-machine
+# Install self-hosted runner first — see cicdSelfHostedNote.text
+git push origin ci-cd-pipeline-local-machine
+# App: http://localhost:8080
+```

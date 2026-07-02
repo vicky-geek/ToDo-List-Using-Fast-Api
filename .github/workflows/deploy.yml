@@ -5,9 +5,15 @@ on:
     branches:
       - main
       - laodBalance-and-rateLimiting
+      - ci-cd-pipeline-local-machine
 
 jobs:
-  deploy:
+  # ---------------------------------------------------------------------------
+  # Cloud runner — GitHub-hosted ubuntu-latest + SSH deploy to VPS
+  # Branches: main, laodBalance-and-rateLimiting
+  # ---------------------------------------------------------------------------
+  deploy-cloud:
+    if: github.ref != 'refs/heads/ci-cd-pipeline-local-machine'
     runs-on: ubuntu-latest
 
     steps:
@@ -30,7 +36,7 @@ jobs:
           docker build -t vickygeek/todo_frontend:latest ./frontend
           docker push vickygeek/todo_frontend:latest
 
-      - name: Deploy to VPS
+      - name: Deploy to VPS via SSH
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.HOST }}
@@ -41,3 +47,43 @@ jobs:
             git pull origin laodBalance-and-rateLimiting || git pull origin main
             docker compose -f docker-compose.dockerhub.yml pull
             docker compose -f docker-compose.dockerhub.yml up -d
+
+  # ---------------------------------------------------------------------------
+  # Self-hosted runner — runs on YOUR local machine (no SSH needed)
+  # Branch: ci-cd-pipeline-local-machine
+  # ---------------------------------------------------------------------------
+  deploy-self-hosted:
+    if: github.ref == 'refs/heads/ci-cd-pipeline-local-machine'
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push backend image
+        run: |
+          docker build -t vickygeek/todo_fast_api:latest ./backend
+          docker push vickygeek/todo_fast_api:latest
+
+      - name: Build and push frontend image
+        run: |
+          docker build -t vickygeek/todo_frontend:latest ./frontend
+          docker push vickygeek/todo_frontend:latest
+
+      - name: Ensure .env exists
+        run: |
+          if [ ! -f .env ]; then
+            echo "::error::.env missing in workspace. See cicdSelfHostedNote.text section 6"
+            exit 1
+          fi
+
+      - name: Deploy on local machine
+        run: |
+          docker compose -f docker-compose.dockerhub.yml pull
+          docker compose -f docker-compose.dockerhub.yml up -d
